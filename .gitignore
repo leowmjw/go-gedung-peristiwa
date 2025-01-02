@@ -30,3 +30,6 @@ go.work.sum
 # Ignore Direnv
 .envrc*
 
+# Ignore Overmind or Air (?)  folders ..
+tmp
+

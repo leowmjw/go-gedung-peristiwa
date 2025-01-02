@@ -14,3 +14,9 @@ SQLMesh will start with the Bronze layer and track the transformation from there
 GlareDB can help in combining? Or transform with Spark v4 Comet? Or loaded into frame with Daft?
 
 Sensitive fields marked by source (and auto detected)
+
+## Articles on Observability 2.0
+
+- TODO
+- TODO .. Brosi Tame
+- TODO - HoneyCOmb free custom metrics ..
