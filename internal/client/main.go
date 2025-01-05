@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -103,82 +104,91 @@ func marshalValue(mm *easyproto.MessageMarshaler, v *shared.Value) {
 	}
 }
 
-func main() {
-	pool := &sync.Pool{
-		New: func() interface{} {
-			return &easyproto.Marshaler{}
+func generateRandomMetric() shared.MetricPoint {
+	// Random values for properties
+	intVal := rand.Int63n(1000)
+	floatVal := rand.Float64() * 100
+	strVals := []string{"test", "prod", "dev", "staging"}
+	strVal := strVals[rand.Intn(len(strVals))]
+
+	// Random environments and hosts
+	envs := []string{"prod", "staging", "dev", "test"}
+	hosts := []string{"server1", "server2", "server3", "server4", "server5"}
+	
+	// Decide if this will be a simple or complex metric
+	isComplex := rand.Float32() < 0.4 // 40% chance of complex metric
+
+	metric := shared.MetricPoint{
+		Timestamp: time.Now().UnixNano(),
+		Value:     rand.Float64() * 1000,
+		IsNull:    rand.Float32() < 0.1, // 10% chance of null
+		Labels: []shared.Label{
+			{Name: "host", Value: hosts[rand.Intn(len(hosts))]},
+			{Name: "env", Value: envs[rand.Intn(len(envs))]},
 		},
-	}
-
-	conn, err := grpc.Dial("localhost"+shared.ServerAddress, grpc.WithInsecure())
-	if err != nil {
-		log.Fatalf("failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // This will gracefully cancel the stream when we're done
-
-	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{
-		StreamName:    shared.MethodName,
-		ServerStreams: true,
-		ClientStreams: true,
-	}, shared.FullMethodPath)
-	if err != nil {
-		log.Fatalf("failed to create stream: %v", err)
-	}
-
-	// Create sample metrics
-	intVal := int64(42)
-	floatVal := 3.14
-	strVal := "test"
-
-	metrics := []shared.MetricPoint{
-		{
-			Timestamp: time.Now().UnixNano(),
-			Value:     123.456,
-			IsNull:    false,
-			Labels: []shared.Label{
-				{Name: "host", Value: "server1"},
-				{Name: "env", Value: "prod"},
-			},
-			Properties: &shared.KeyValue{
-				Items: map[string]shared.Value{
-					"count": {
-						Type:   shared.ValueType_INT,
-						IntVal: &intVal,
-					},
-					"ratio": {
-						Type:     shared.ValueType_FLOAT,
-						FloatVal: &floatVal,
-					},
-					"tags": {
-						Type: shared.ValueType_LIST,
-						ListVal: []shared.Value{
-							{
-								Type:      shared.ValueType_STRING,
-								StringVal: &strVal,
-							},
-						},
-					},
+		Properties: &shared.KeyValue{
+			Items: map[string]shared.Value{
+				"count": {
+					Type:   shared.ValueType_INT,
+					IntVal: &intVal,
 				},
 			},
 		},
 	}
 
-	// Send metrics
+	if isComplex {
+		// Add more labels
+		extraLabels := []struct{ name, value string }{
+			{"region", "us-west"},
+			{"datacenter", "dc1"},
+			{"service", "api"},
+			{"version", "v1.2.3"},
+		}
+		for _, label := range extraLabels {
+			if rand.Float32() < 0.7 { // 70% chance to include each extra label
+				metric.Labels = append(metric.Labels, shared.Label{
+					Name:  label.name,
+					Value: label.value,
+				})
+			}
+		}
+
+		// Add more properties
+		metric.Properties.Items["ratio"] = shared.Value{
+			Type:     shared.ValueType_FLOAT,
+			FloatVal: &floatVal,
+		}
+		metric.Properties.Items["tags"] = shared.Value{
+			Type: shared.ValueType_LIST,
+			ListVal: []shared.Value{
+				{
+					Type:      shared.ValueType_STRING,
+					StringVal: &strVal,
+				},
+			},
+		}
+	}
+
+	return metric
+}
+
+func sendMetricsBatch(ctx context.Context, metrics []shared.MetricPoint, stream grpc.ClientStream, pool *sync.Pool, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	for _, metric := range metrics {
 		data := marshalMetricPoint(&metric, pool)
 		log.Printf("Sending metric with data length: %d", len(data))
 		req := &MetricsRequest{Data: data}
 
 		if err := stream.SendMsg(req); err != nil {
-			log.Fatalf("failed to send metric: %v", err)
+			log.Printf("Failed to send metric: %v", err)
+			return
 		}
 
 		resp := &MetricsResponse{}
 		if err := stream.RecvMsg(resp); err != nil {
-			log.Fatalf("failed to receive response: %v", err)
+			log.Printf("Failed to receive response: %v", err)
+			return
 		}
 
 		log.Printf("Received response with data length: %d", len(resp.Data))
@@ -189,9 +199,11 @@ func main() {
 		var message string
 
 		for len(data) > 0 {
+			var err error
 			data, err = fc.NextField(data)
 			if err != nil {
-				log.Fatalf("failed to parse response: %v", err)
+				log.Printf("Failed to parse response: %v", err)
+				return
 			}
 
 			switch fc.FieldNum {
@@ -208,9 +220,74 @@ func main() {
 
 		log.Printf("Response: success=%v, message=%s", success, message)
 	}
+}
 
-	// Gracefully close the stream
-	if err := stream.CloseSend(); err != nil {
-		log.Printf("Error closing stream: %v", err)
+func main() {
+	rand.Seed(time.Now().UnixNano())
+
+	pool := &sync.Pool{
+		New: func() interface{} {
+			return &easyproto.Marshaler{}
+		},
 	}
+
+	conn, err := grpc.Dial("localhost"+shared.ServerAddress, grpc.WithInsecure())
+	if err != nil {
+		log.Fatalf("failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Generate random number of metrics between 10 and 25
+	numMetrics := 10 + rand.Intn(16)
+	log.Printf("Generating %d metrics", numMetrics)
+
+	// Generate all metrics
+	var metrics []shared.MetricPoint
+	for i := 0; i < numMetrics; i++ {
+		metrics = append(metrics, generateRandomMetric())
+	}
+
+	// Create streams for concurrent batches
+	var streams []grpc.ClientStream
+	numStreams := (len(metrics) + 9) / 10 // Ceiling division to get number of needed streams
+	for i := 0; i < numStreams; i++ {
+		stream, err := conn.NewStream(ctx, &grpc.StreamDesc{
+			StreamName:    shared.MethodName,
+			ServerStreams: true,
+			ClientStreams: true,
+		}, shared.FullMethodPath)
+		if err != nil {
+			log.Fatalf("Failed to create stream %d: %v", i, err)
+		}
+		streams = append(streams, stream)
+		defer func(s grpc.ClientStream) {
+			if err := s.CloseSend(); err != nil {
+				log.Printf("Error closing stream: %v", err)
+			}
+		}(stream)
+	}
+
+	// Send metrics in batches concurrently
+	var wg sync.WaitGroup
+	batchSize := 5 + rand.Intn(6) // Random batch size between 5 and 10
+	
+	for i := 0; i < len(metrics); i += batchSize {
+		end := i + batchSize
+		if end > len(metrics) {
+			end = len(metrics)
+		}
+		
+		batch := metrics[i:end]
+		streamIndex := i / batchSize
+		
+		wg.Add(1)
+		go sendMetricsBatch(ctx, batch, streams[streamIndex], pool, &wg)
+	}
+
+	// Wait for all batches to complete
+	wg.Wait()
+	log.Printf("All metrics sent successfully")
 }
