@@ -116,7 +116,9 @@ func main() {
 	}
 	defer conn.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // This will gracefully cancel the stream when we're done
+
 	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{
 		StreamName:    shared.MethodName,
 		ServerStreams: true,
@@ -205,5 +207,10 @@ func main() {
 		}
 
 		log.Printf("Response: success=%v, message=%s", success, message)
+	}
+
+	// Gracefully close the stream
+	if err := stream.CloseSend(); err != nil {
+		log.Printf("Error closing stream: %v", err)
 	}
 }

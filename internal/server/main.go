@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"app/internal/shared"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/VictoriaMetrics/easyproto"
-	"google.golang.org/grpc"
 )
 
 // MetricsRequest represents a gRPC message containing metric data
@@ -55,72 +59,115 @@ type MetricsService struct {
 }
 
 func (s *MetricsService) ProcessMetrics(stream grpc.ServerStream) error {
+	// Get the context from the stream
+	ctx := stream.Context()
+
 	for {
-		// Read incoming message
-		req := &MetricsRequest{}
-		err := stream.RecvMsg(req)
-		if err != nil {
-			log.Printf("Error receiving message: %v", err)
-			return err
-		}
+		select {
+		case <-ctx.Done():
+			// Client has disconnected or context was canceled
+			log.Printf("Client disconnected: %v", ctx.Err())
+			return nil
+		default:
+			// Read incoming message with a timeout
+			readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			req := &MetricsRequest{}
+			errChan := make(chan error, 1)
 
-		log.Printf("Received request with data length: %d", len(req.Data))
+			go func() {
+				errChan <- stream.RecvMsg(req)
+			}()
 
-		// Unmarshal using easyproto
-		metric, err := unmarshalMetricPoint(req.Data)
-		if err != nil {
-			log.Printf("Error unmarshaling metric: %v", err)
-			// Send error response
-			m := s.marshalerPool.Get().(*easyproto.Marshaler)
-			mm := m.MessageMarshaler()
-			mm.AppendBool(1, false)
-			mm.AppendString(2, err.Error())
-			resp := &MetricsResponse{Data: m.Marshal(nil)}
-			m.Reset()
-			s.marshalerPool.Put(m)
-			if err := stream.SendMsg(resp); err != nil {
-				log.Printf("Error sending error response: %v", err)
-				return err
-			}
-			continue
-		}
-
-		// Process the metric
-		log.Printf("Successfully unmarshaled metric: timestamp=%d, value=%f, isNull=%v", 
-			metric.Timestamp, metric.Value, metric.IsNull)
-
-		for _, label := range metric.Labels {
-			log.Printf("Label: %s=%s", label.Name, label.Value)
-		}
-
-		if metric.Properties != nil {
-			for key, value := range metric.Properties.Items {
-				switch value.Type {
-				case shared.ValueType_INT:
-					log.Printf("Property %s: %d", key, *value.IntVal)
-				case shared.ValueType_FLOAT:
-					log.Printf("Property %s: %f", key, *value.FloatVal)
-				case shared.ValueType_STRING:
-					log.Printf("Property %s: %s", key, *value.StringVal)
-				case shared.ValueType_LIST:
-					log.Printf("Property %s: list with %d items", key, len(value.ListVal))
+			select {
+			case err := <-errChan:
+				cancel()
+				if err == io.EOF {
+					log.Printf("Client closed stream")
+					return nil
 				}
+				if err != nil {
+					if status.Code(err) == codes.Canceled {
+						log.Printf("Client disconnected gracefully")
+						return nil
+					}
+					log.Printf("Error receiving message: %v", err)
+					return err
+				}
+
+				log.Printf("Received request with data length: %d", len(req.Data))
+
+				// Unmarshal using easyproto
+				metric, err := unmarshalMetricPoint(req.Data)
+				if err != nil {
+					log.Printf("Error unmarshaling metric: %v", err)
+					// Send error response
+					m := s.marshalerPool.Get().(*easyproto.Marshaler)
+					mm := m.MessageMarshaler()
+					mm.AppendBool(1, false)
+					mm.AppendString(2, err.Error())
+					resp := &MetricsResponse{Data: m.Marshal(nil)}
+					m.Reset()
+					s.marshalerPool.Put(m)
+					if err := stream.SendMsg(resp); err != nil {
+						log.Printf("Error sending error response: %v", err)
+						return err
+					}
+					continue
+				}
+
+				// Process the metric
+				log.Printf("Successfully unmarshaled metric: timestamp=%d, value=%f, isNull=%v", 
+					metric.Timestamp, metric.Value, metric.IsNull)
+
+				for _, label := range metric.Labels {
+					log.Printf("Label: %s=%s", label.Name, label.Value)
+				}
+
+				if metric.Properties != nil {
+					for key, value := range metric.Properties.Items {
+						switch value.Type {
+						case shared.ValueType_INT:
+							log.Printf("Property %s: %d", key, *value.IntVal)
+						case shared.ValueType_FLOAT:
+							log.Printf("Property %s: %f", key, *value.FloatVal)
+						case shared.ValueType_STRING:
+							log.Printf("Property %s: %s", key, *value.StringVal)
+						case shared.ValueType_LIST:
+							log.Printf("Property %s: list with %d items", key, len(value.ListVal))
+						}
+					}
+				}
+
+				// Send success response
+				m := s.marshalerPool.Get().(*easyproto.Marshaler)
+				mm := m.MessageMarshaler()
+				mm.AppendBool(1, true)
+				mm.AppendString(2, "Processed successfully")
+				resp := &MetricsResponse{Data: m.Marshal(nil)}
+				m.Reset()
+				s.marshalerPool.Put(m)
+				if err := stream.SendMsg(resp); err != nil {
+					if status.Code(err) == codes.Canceled {
+						log.Printf("Client disconnected while sending response")
+						return nil
+					}
+					log.Printf("Error sending success response: %v", err)
+					return err
+				}
+				log.Printf("Successfully sent response")
+
+			case <-readCtx.Done():
+				cancel()
+				if ctx.Err() != nil {
+					// Parent context was canceled (client disconnected)
+					log.Printf("Client disconnected during read")
+					return nil
+				}
+				// Read timeout
+				log.Printf("Read timeout, continuing...")
+				continue
 			}
 		}
-
-		// Send success response
-		m := s.marshalerPool.Get().(*easyproto.Marshaler)
-		mm := m.MessageMarshaler()
-		mm.AppendBool(1, true)
-		mm.AppendString(2, "Processed successfully")
-		resp := &MetricsResponse{Data: m.Marshal(nil)}
-		m.Reset()
-		s.marshalerPool.Put(m)
-		if err := stream.SendMsg(resp); err != nil {
-			log.Printf("Error sending success response: %v", err)
-			return err
-		}
-		log.Printf("Successfully sent response")
 	}
 }
 
