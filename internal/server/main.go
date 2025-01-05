@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"app/internal/shared"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -116,7 +117,7 @@ func (s *MetricsService) ProcessMetrics(stream grpc.ServerStream) error {
 				}
 
 				// Process the metric
-				log.Printf("Successfully unmarshaled metric: timestamp=%d, value=%f, isNull=%v", 
+				log.Printf("Successfully unmarshaled metric: timestamp=%d, value=%f, isNull=%v",
 					metric.Timestamp, metric.Value, metric.IsNull)
 
 				for _, label := range metric.Labels {
@@ -430,7 +431,7 @@ func main() {
 		Streams: []grpc.StreamDesc{
 			{
 				StreamName:    shared.MethodName,
-				Handler:      streamHandler,
+				Handler:       streamHandler,
 				ServerStreams: true,
 				ClientStreams: true,
 			},
