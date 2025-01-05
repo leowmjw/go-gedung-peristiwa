@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"sync"
@@ -177,29 +178,38 @@ func sendMetricsBatch(ctx context.Context, metrics []shared.MetricPoint, stream 
 	defer wg.Done()
 
 	for _, metric := range metrics {
+		// Get marshaler from pool
+		marshaler := pool.Get().(*easyproto.Marshaler)
 		data := marshalMetricPoint(&metric, pool)
+		pool.Put(marshaler)
+
 		log.Printf("Sending metric with data length: %d", len(data))
 		req := &MetricsRequest{Data: data}
-
 		if err := stream.SendMsg(req); err != nil {
+			if err == io.EOF {
+				log.Printf("Stream closed by server")
+				return
+			}
 			log.Printf("Failed to send metric: %v", err)
-			return
+			continue
 		}
 
-		// Only receive response if stream is still active
+		// Get response
 		resp := &MetricsResponse{}
 		if err := stream.RecvMsg(resp); err != nil {
+			if err == io.EOF {
+				log.Printf("Stream closed by server")
+				return
+			}
 			log.Printf("Failed to receive response: %v", err)
-			return
+			continue
 		}
-
 		log.Printf("Received response with data length: %d", len(resp.Data))
 	}
 }
 
 func main() {
 	// Parse command line flags
-	numMetrics := flag.Int("metrics", 10, "Number of metrics to generate")
 	flag.Parse()
 
 	// Create a pool for marshalers
@@ -209,11 +219,13 @@ func main() {
 		},
 	}
 
-	log.Printf("Generating %d metrics", *numMetrics)
+	// Generate random number of metrics between 10 and 25
+	numMetrics := rand.Intn(16) + 10 // 10 to 25 inclusive
+	log.Printf("Generating %d metrics", numMetrics)
 
 	// Generate random metrics
-	metrics := make([]shared.MetricPoint, *numMetrics)
-	for i := 0; i < *numMetrics; i++ {
+	metrics := make([]shared.MetricPoint, numMetrics)
+	for i := 0; i < numMetrics; i++ {
 		metrics[i] = generateRandomMetric()
 	}
 
@@ -250,5 +262,10 @@ func main() {
 	}
 
 	wg.Wait()
+
+	// Close the stream gracefully
+	if err := stream.CloseSend(); err != nil {
+		log.Printf("Error closing stream: %v", err)
+	}
 	log.Printf("All metrics sent successfully")
 }
