@@ -1,0 +1,138 @@
+openapi: 3.0.0
+info:
+  title: Metrics Service API
+  version: 1.0.0
+  description: API for submitting metrics data
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /metrics/v1/batch:
+    post:
+      summary: Submit batch metrics
+      description: Submit a batch of metrics for processing
+      operationId: submitMetricsBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MetricsBatchRequest'
+      responses:
+        '200':
+          description: Metrics processed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsBatchResponse'
+        '400':
+          description: Invalid request format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '405':
+          description: Method not allowed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    MetricsBatchRequest:
+      type: object
+      required:
+        - metrics
+      properties:
+        metrics:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricPoint'
+    
+    MetricPoint:
+      type: object
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+          description: Unix timestamp in nanoseconds
+        value:
+          type: number
+          format: double
+        isNull:
+          type: boolean
+        labels:
+          type: array
+          items:
+            $ref: '#/components/schemas/Label'
+        properties:
+          $ref: '#/components/schemas/KeyValue'
+    
+    Label:
+      type: object
+      required:
+        - name
+        - value
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+    
+    KeyValue:
+      type: object
+      properties:
+        items:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/Value'
+    
+    Value:
+      type: object
+      properties:
+        type:
+          type: integer
+          enum: [0, 1, 2, 3, 4]
+          description: |
+            Value type:
+            0 = UNSPECIFIED
+            1 = INT
+            2 = FLOAT
+            3 = STRING
+            4 = LIST
+        intVal:
+          type: integer
+          format: int64
+        floatVal:
+          type: number
+          format: double
+        stringVal:
+          type: string
+        listVal:
+          type: array
+          items:
+            $ref: '#/components/schemas/Value'
+    
+    MetricsBatchResponse:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        error:
+          type: string
+    
+    ErrorResponse:
+      type: object
+      required:
+        - success
+        - error
+      properties:
+        success:
+          type: boolean
+        error:
+          type: string

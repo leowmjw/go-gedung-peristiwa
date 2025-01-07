@@ -1,0 +1,31 @@
+{
+  "metrics": [
+    {
+      "timestamp": 1736099319532503000,
+      "value": 42.5,
+      "isNull": false,
+      "labels": [
+        {
+          "name": "host",
+          "value": "test-server"
+        },
+        {
+          "name": "env",
+          "value": "staging"
+        }
+      ],
+      "properties": {
+        "items": {
+          "version": {
+            "type": 3,
+            "stringVal": "1.0.0"
+          },
+          "count": {
+            "type": 1,
+            "intVal": 100
+          }
+        }
+      }
+    }
+  ]
+}

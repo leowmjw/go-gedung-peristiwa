@@ -6,9 +6,11 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
+	"app/internal/httpapi"
 	"app/internal/shared"
 
 	"google.golang.org/grpc"
@@ -410,6 +412,7 @@ func unmarshalValue(data []byte) (*shared.Value, error) {
 }
 
 func main() {
+	// Start gRPC server
 	lis, err := net.Listen("tcp", shared.ServerAddress)
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
@@ -444,8 +447,21 @@ func main() {
 		},
 	})
 
-	log.Printf("Server listening at %v", lis.Addr())
+	// Create HTTP server
+	httpMetrics := httpapi.NewMetricsService()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics/v1/batch", httpMetrics.HandleBatchMetrics)
+
+	// Start both servers
+	go func() {
+		log.Printf("HTTP server listening at :8080")
+		if err := http.ListenAndServe(":8080", mux); err != nil {
+			log.Fatalf("failed to serve HTTP: %v", err)
+		}
+	}()
+
+	log.Printf("gRPC server listening at %v", lis.Addr())
 	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+		log.Fatalf("failed to serve gRPC: %v", err)
 	}
 }
