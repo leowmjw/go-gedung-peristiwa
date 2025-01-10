@@ -11,12 +11,12 @@ import (
 
 func TestHandleBatchMetrics(t *testing.T) {
 	tests := []struct {
-		name           string
-		method         string
-		requestBody    interface{}
-		wantStatus     int
-		wantSuccess    bool
-		wantErrSubstr  string
+		name          string
+		method        string
+		requestBody   any
+		wantStatus    int
+		wantSuccess   bool
+		wantErrSubstr string
 	}{
 		{
 			name:   "valid request",
@@ -40,8 +40,8 @@ func TestHandleBatchMetrics(t *testing.T) {
 			name:          "wrong method",
 			method:        http.MethodGet,
 			requestBody:   HTTPMetricRequest{},
-			wantStatus:   http.StatusMethodNotAllowed,
-			wantSuccess:  false,
+			wantStatus:    http.StatusMethodNotAllowed,
+			wantSuccess:   false,
 			wantErrSubstr: "method not allowed",
 		},
 		{
@@ -50,16 +50,16 @@ func TestHandleBatchMetrics(t *testing.T) {
 			requestBody: HTTPMetricRequest{
 				Metrics: []shared.MetricPoint{},
 			},
-			wantStatus:   http.StatusBadRequest,
-			wantSuccess:  false,
+			wantStatus:    http.StatusBadRequest,
+			wantSuccess:   false,
 			wantErrSubstr: "no metrics provided",
 		},
 		{
 			name:          "invalid json",
 			method:        http.MethodPost,
 			requestBody:   "invalid json",
-			wantStatus:   http.StatusBadRequest,
-			wantSuccess:  false,
+			wantStatus:    http.StatusBadRequest,
+			wantSuccess:   false,
 			wantErrSubstr: "invalid request format",
 		},
 	}

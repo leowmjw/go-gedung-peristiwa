@@ -214,7 +214,7 @@ func main() {
 
 	// Create a pool for marshalers
 	pool := &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &easyproto.Marshaler{}
 		},
 	}
@@ -250,13 +250,13 @@ func main() {
 	// Send metrics in batches
 	batchSize := 5
 	var wg sync.WaitGroup
-	
+
 	for i := 0; i < len(metrics); i += batchSize {
 		end := i + batchSize
 		if end > len(metrics) {
 			end = len(metrics)
 		}
-		
+
 		wg.Add(1)
 		go sendMetricsBatch(ctx, metrics[i:end], stream, pool, &wg)
 	}

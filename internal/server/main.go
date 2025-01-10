@@ -174,7 +174,7 @@ func (s *MetricsService) ProcessMetrics(stream grpc.ServerStream) error {
 	}
 }
 
-func streamHandler(srv interface{}, stream grpc.ServerStream) error {
+func streamHandler(srv any, stream grpc.ServerStream) error {
 	s := srv.(*MetricsService)
 	return s.ProcessMetrics(stream)
 }
@@ -419,17 +419,17 @@ func main() {
 	}
 
 	s := grpc.NewServer(
-		grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 			return handler(ctx, req)
 		}),
-		grpc.StreamInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		grpc.StreamInterceptor(func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 			return handler(srv, ss)
 		}),
 	)
 
 	s.RegisterService(&grpc.ServiceDesc{
 		ServiceName: shared.ServiceName,
-		HandlerType: (*interface{})(nil),
+		HandlerType: (*any)(nil),
 		Methods:     []grpc.MethodDesc{},
 		Streams: []grpc.StreamDesc{
 			{
@@ -441,7 +441,7 @@ func main() {
 		},
 	}, &MetricsService{
 		marshalerPool: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				return &easyproto.Marshaler{}
 			},
 		},

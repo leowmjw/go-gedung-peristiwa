@@ -19,7 +19,7 @@ type MetricsService struct {
 func NewMetricsService() *MetricsService {
 	return &MetricsService{
 		marshalerPool: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				return &easyproto.Marshaler{}
 			},
 		},
@@ -54,11 +54,11 @@ func (s *MetricsService) HandleBatchMetrics(w http.ResponseWriter, r *http.Reque
 		// Log metric (similar to gRPC server)
 		log.Printf("Received HTTP metric: timestamp=%d, value=%f, isNull=%v",
 			metric.Timestamp, metric.Value, metric.IsNull)
-		
+
 		for _, label := range metric.Labels {
 			log.Printf("Label: %s=%s", label.Name, label.Value)
 		}
-		
+
 		if metric.Properties != nil {
 			log.Printf("Property count: %d", len(metric.Properties.Items))
 		}
