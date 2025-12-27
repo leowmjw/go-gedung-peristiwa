@@ -14,3 +14,16 @@ InfluxDB v3; it is time-series specific. When ingesting; there is a catalog whic
 ClickHouse uses a single-level LSM during ingestion; materialization is able to match the query pattern.  Depending on the query can select the correct algo.
 
 VictoriaMetrics is able to use its existing component to form up an app VictoriaLogs which apparently meet what we need?
+
+Using NATS as light-weight moduler monolith - https://kaustavdm.medium.com/ultra-lightweight-nats-based-modular-app-framework-in-go-860d210f46de
+
+Using httpz as a more strucutred endpoint .. chi + echo 
+
+Full OpenAPI v3 implementaiton + validaiton ..
+
+- Huma - 
+- dd
+- ddd
+- ddd
+
+Test with Bruno ..

@@ -4,6 +4,7 @@ go 1.23.4
 
 require (
 	github.com/VictoriaMetrics/easyproto v0.1.4
+	github.com/aeilang/httpz v1.1.2
 	google.golang.org/grpc v1.69.2
 )
 
