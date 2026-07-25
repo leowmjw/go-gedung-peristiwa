@@ -123,6 +123,44 @@ run = "go test -race -tags=e2e ./test/e2e/..."
 description = "Start MinIO + dev HTTP UI (air reload) via overmind"
 run = "overmind start"
 
+[tasks.demo]
+description = "Start MinIO + transit map demo via overmind"
+run = "overmind start -f Procfile.demo"
+
+[tasks."dev:isledb-debug"]
+description = "IsleDB tail experiments — memory backend (baseline)"
+run = "go run ./cmd/isledb-debug/ --backend memory"
+
+[tasks."dev:isledb-debug-minio"]
+description = "IsleDB tail experiments — MinIO (requires MinIO running + mise run minio-setup)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run minio-setup
+go run ./cmd/isledb-debug/ --backend minio
+"""
+
+[tasks."dev:isledb-debug-tigris"]
+description = "IsleDB tail experiments — Tigris (requires Tigris creds in .env)"
+run = "go run ./cmd/isledb-debug/ --backend tigris"
+
+[tasks."dev:isledb-debug-compare"]
+description = "Run memory + MinIO tail experiments side-by-side (isolate object-store vs IsleDB)"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+echo "========== MEMORY (IsleDB baseline) =========="
+go run ./cmd/isledb-debug/ --backend memory --prefix-suffix "cmp-mem-$(date +%s)"
+echo ""
+echo "========== MINIO (S3-compatible local) =========="
+mise run minio-setup
+go run ./cmd/isledb-debug/ --backend minio --prefix-suffix "cmp-minio-$(date +%s)"
+echo ""
+echo "Compare visibility first_full row + incremental tail_events/timeouts above."
+echo "If memory OK but MinIO/Tigris slow/timeout → object-store visibility issue."
+echo "If all backends fail incremental → likely IsleDB TailingReader or harness bug."
+"""
+
 [tasks.simulate]
 description = "Run simulation against MinIO"
 run = "go run ./cmd/simulate/ --backend minio"

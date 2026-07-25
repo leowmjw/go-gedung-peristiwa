@@ -46,6 +46,8 @@ routing, testing/synctest
 - **All env vars load from `.env`** via `mise.toml` → `[env] _.file = ".env"` (copy from `.env.example`)
 - Tools available: ripgrep, fzf, air, goreleaser, watchexec
 - Use overmind to start MinIO + simulate (`mise run dev`)
+- Use `mise run demo` for KL transit map (`Procfile.demo`, port `DEMO_HTTP_ADDR=:8081`)
+- IsleDB tail debugging: `mise run dev:isledb-debug` (see **IsleDB Learnings** below)
 
 ## Specification (MVP)
 
@@ -77,7 +79,121 @@ routing, testing/synctest
 - [x] E2E test tag + mise tasks (`test-e2e`, `simulate-tigris`)
 - [ ] Procfile + overmind E2E (manual: `mise run dev` with MinIO running)
 
+### Phase 3: KL Transit Demo (DONE)
+- [x] `cmd/demo` — GTFS poller (KL feeds), IsleDB on MinIO, Leaflet map UI
+- [x] `internal/gtfs/` — 15 feeds defined; demo uses `gtfs.KLFeeds()` (RapidKL + MRT Feeder)
+- [x] `internal/demo/` — per-agency IsleDB writers; in-memory `LatestPositions()` for live UI
+- [x] `internal/web/demo/` — plain JSON SSE (`event: vehicles`, `event: stats`); no Datastar CDN
+- [x] `Procfile.demo` + `mise run demo` (separate from dev `Procfile`)
+
 ### Deferred (post-MVP)
 - Temporal workflows
-- DEMO.md (GTFS + Datastar map)
+- Full Malaysia map (all 15 feeds; demo is KL-only for now)
 - github.com/tigrisdata/storage-go (Tigris-specific APIs beyond S3)
+
+## IsleDB Learnings (v0.4.2)
+
+### ChangeFeed does not exist
+Pinned `github.com/ankur-anand/isledb@v0.4.2` has **no `ChangeFeed` field** on `WriterOptions`.
+`DEMO.md` / `TECHSPEC.md` references to `opts.ChangeFeed.Enabled` are aspirational.
+Use `FlushInterval` on the writer + `TailingReader` (`CatchUp` / `Tail`) for ordered replay.
+
+### TailingReader is fine for batch verification, flaky for live UI fan-out
+FinTech simulation (`internal/pipeline/tenant.go` → `TailCatchUp`) works: one-shot
+catch-up after flush, assert key count in tests.
+
+**Why live SSE + `TailingReader.Tail` failed in the KL demo** (first render OK, map
+stuck thereafter):
+
+| Factor | Effect |
+|---|---|
+| Historical replay | Each SSE client opens new tailers per agency; `Tail` replays all existing keys on connect — duplicates the initial `ScanLatest` snapshot |
+| Per-key fan-out | One SSE `vehicle` event + `stats` per tailed key (~164/poll) overwhelms the browser EventSource queue |
+| Object-store visibility | Writer flush → manifest/SST visible on MinIO has latency; 500ms `PollInterval` tail loop can miss or delay updates |
+| Same-process writer + tailer | Demo writes and tails the same prefix in one process; refresh timing is harder to reason about than read-only tailers |
+| Channel backpressure | `TailUpdates` uses a buffered chan (256); tail replay can fill it while the HTTP handler is still draining stale keys |
+
+**Symptom:** stats may tick (polling works), markers render once, then do not move on
+subsequent 30s GTFS polls.
+
+**Demo fix (current):** do **not** tail for the browser. After each poll
+`Write` + `FlushAll`, call `Pipeline.NotifyPoll()`; SSE handlers push
+`Pipeline.LatestPositions()` (in-memory latest per `agency:vehicle_id`) as a
+batch `event: vehicles`. IsleDB remains the durable write path; UI reads memory.
+
+Code: `internal/demo/pipeline.go` (`NotifyPoll`, `SubscribePolls`, `LatestPositions`),
+`internal/web/demo/server.go` (`handleVehicleStream`), `cmd/demo/main.go` (calls
+`NotifyPoll` after poll).
+
+### How to reproduce / test tailing separately (another session)
+
+**Unit test (passes, memory backend):**
+```bash
+go test ./internal/demo/ -run TestPipelineWriteScanTail -v
+```
+Writes positions, flushes, asserts `TailUpdates` receives at least one event.
+
+**Simulate the UI failure (MinIO, tail-driven SSE):**
+1. Temporarily revert `handleVehicleStream` to use `TailUpdates` instead of
+   `SubscribePolls` (or checkout pre-notify commit).
+2. `mise run demo` → open http://localhost:8081
+3. Confirm first marker render; wait 30–60s for next GTFS poll
+4. Observe: `Updated` time may change but markers stay static; Network tab shows
+   flood of `event: vehicle` lines, not a clean `event: vehicles` refresh
+
+**Compare with working path:**
+```bash
+curl -sN --max-time 65 http://localhost:8081/api/vehicles/stream | rg 'event: vehicles'
+```
+Expect **≥2** `event: vehicles` lines across one poll interval (initial + post-poll).
+Tail-only path sends hundreds of `event: vehicle` lines and rarely updates the map.
+
+**Key format note:** `{agency}:{vehicle_id}:{timestamp_ns}` — each poll creates new
+keys; tail emits every key, but UI dedupes by `agency:vehicle_id`. Compaction does
+not help the live tail fan-out problem.
+
+### Debug harness: isolate IsleDB vs MinIO vs Tigris (no demo required)
+
+Use `cmd/isledb-debug` — minimal writer + `TailingReader` on a throwaway prefix.
+No GTFS, HTTP, or map. Answers: **is tail flakiness IsleDB core or S3 visibility?**
+
+```bash
+mise run dev:isledb-debug              # memory baseline (~instant visibility)
+mise run dev:isledb-debug-minio        # local MinIO (needs MinIO up)
+mise run dev:isledb-debug-tigris       # Tigris (needs creds in .env)
+mise run dev:isledb-debug-compare      # memory + MinIO back-to-back
+```
+
+Single experiment flags:
+```bash
+go run ./cmd/isledb-debug/ --backend minio --experiment visibility
+go run ./cmd/isledb-debug/ --backend tigris --experiment incremental --wait 15s
+```
+
+| Experiment | What it tests | Healthy signal | Suggests bug in |
+|---|---|---|---|
+| `visibility` | Write batch-2, flush, CatchUp after 0–5000ms delays | `keys_seen=5` by ≤500ms on memory; MinIO may need longer | Object-store manifest/SST visibility if memory OK but MinIO/Tigris slow |
+| `incremental` | `Tail` running, then write+flush new batch | `tail_events=5`, `timeout=false`, `first_new_ms` < 2s | IsleDB `Tail` loop or same-process refresh if **all** backends timeout |
+| `replay` | `Tail` with no new writes for 2s | `replay_events_in_2000ms` > 0 | Explains demo SSE flood (historical replay), not a storage bug |
+
+**How to read compare output:**
+
+1. **Memory passes, MinIO/Tigris fail `incremental` or high `visibility` delay** → S3-compatible
+   layer (eventual consistency, list/head latency). Mitigation: poll+broadcast UI (current demo),
+   or separate tailer process, or longer tail `PollInterval` + reader `Refresh`.
+2. **All backends fail `incremental`** → IsleDB `TailingReader.Tail` behaviour or harness bug;
+   file issue upstream with repro from `internal/isledbdebug/`.
+3. **All pass but demo SSE still stuck** → UI/integration issue (per-key SSE flood, EventSource),
+   not IsleDB storage — see replay experiment counts.
+
+**Unit tests (no external deps):**
+```bash
+go test ./internal/isledbdebug/... -v
+```
+
+**Agent next steps if MinIO-specific:** sweep `--wait`, writer `FlushInterval`, tail
+`PollInterval`, and `reader.Refresh()` before `CatchUp` in harness; bisect minimum delay.
+If Tigris same as MinIO → not MinIO-specific. If only MinIO → check path-style endpoint,
+`AWS_S3_USE_PATH_STYLE`, bucket CAS timing.
+
+Code: `internal/isledbdebug/harness.go`, `cmd/isledb-debug/main.go`.

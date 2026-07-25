@@ -119,3 +119,13 @@ func tigrisBucketURL(bucket string) string {
 func cacheDir(cfg StoreConfig, tenantID string) string {
 	return filepath.Join(cfg.CacheRoot, tenantPrefix(tenantID, cfg.PrefixRoot))
 }
+
+// OpenAgencyStore opens a blob store for an agency/tenant prefix.
+func OpenAgencyStore(ctx context.Context, cfg StoreConfig, agencyID string) (*blobstore.Store, error) {
+	return openStore(ctx, cfg, agencyID)
+}
+
+// AgencyCacheDir returns the on-disk cache path for an agency prefix.
+func AgencyCacheDir(cfg StoreConfig, agencyID string) string {
+	return cacheDir(cfg, agencyID)
+}

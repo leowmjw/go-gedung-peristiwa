@@ -138,16 +138,25 @@ func Run(ctx context.Context, cfg Config) ([]Emission, error) {
 
 func trafficMultiplier(elapsed time.Duration, r *rand.Rand) float64 {
 	sec := elapsed.Seconds()
+	intSec := int(sec)
 	base := 1.0 + 0.5*math.Sin(2*math.Pi*sec/15.0)
 
-	// Plateau windows (~1.5x for 5-10s)
-	if int(sec)%20 >= 5 && int(sec)%20 < 12 {
+	// Plateau windows (~1.5x for 5-10s every 20s)
+	if intSec%20 >= 5 && intSec%20 < 12 {
 		base *= 1.5
 	}
 
-	// Random spikes
-	if r.Float64() < 0.05 {
-		base *= 2 + r.Float64()*3
+	// Sustained spike windows using 2s time buckets.
+	// All events in the same 2s bucket share the same spike decision,
+	// so spikes appear as visible bursts in time-series charts.
+	bucket := intSec / 2
+	// Mix bucket into a deterministic seed so spikes are reproducible per second.
+	sr := rand.New(rand.NewSource(int64(bucket*0x9e3779b9 + 0x6c62272e)))
+	switch {
+	case sr.Float64() < 0.06: // ~6% of 2s buckets → sharp spike, 10–20x
+		base *= 10 + sr.Float64()*10
+	case sr.Float64() < 0.15: // ~15% of remaining → medium burst, 3–6x
+		base *= 3 + sr.Float64()*3
 	}
 
 	tenantScale := 0.5 + r.Float64()
