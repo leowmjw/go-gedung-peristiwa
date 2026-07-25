@@ -62,7 +62,7 @@ func TestExpectedKeysUnique(t *testing.T) {
 
 func TestTrafficMultiplierPositive(t *testing.T) {
 	r := rand.New(rand.NewSource(3))
-	for sec := 0; sec < 60; sec++ {
+	for sec := range 60 {
 		m := trafficMultiplier(time.Duration(sec)*time.Second, r)
 		if m <= 0 {
 			t.Fatalf("multiplier %v at sec %d", m, sec)

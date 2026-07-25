@@ -50,27 +50,25 @@ mise run test
 
 Uses in-memory IsleDB (`blobstore.NewMemory`); no external services.
 
-### 3. MVP demo — MinIO + 60s simulation
+### 3. MVP demo — dev UI + MinIO
 
-Starts MinIO, creates the bucket, and runs the full simulation via overmind:
+Starts MinIO, creates the bucket, and runs the **dev HTTP control plane** (with [air](https://github.com/air-verse/air) live reload):
 
 ```bash
 mise run dev
 ```
 
-This runs the [Procfile](Procfile):
+Open **http://localhost:8080** — dashboard shows MinIO + Tigris connectivity, key counts per tenant, and errors in red. Click **Run simulation** to trigger the MVP pipeline (fast mode, 100 events).
 
-| Process   | What it does                                      |
-|-----------|---------------------------------------------------|
-| `minio`   | Local S3 at `localhost:9000` (console `:9001`)     |
-| `setup`   | `mise run minio-setup` — wait for MinIO + bucket |
-| `simulate`| `go run ./cmd/simulate/ --backend minio`          |
+| Process | What it does |
+|---------|----------------|
+| `minio` | Local S3 at `localhost:9000` (console `:9001`) |
+| `dev` | Waits for MinIO, runs `minio-setup`, then **air** HTTP UI on `:8080` |
 
-On success you should see `✅ Simulation passed` (1000 unique events over 60s by default).
-
-**Smoke test without waiting 60s:**
+CLI simulation (no UI):
 
 ```bash
+mise run simulate          # MinIO, 60s / 1000 events
 go run ./cmd/simulate/ --backend memory --fast --events 100
 ```
 
@@ -94,7 +92,7 @@ Uses the same verification as MinIO (read-back, key order, compaction dedup).
 | Doctor | `mise run doctor` | Check prerequisites and env |
 | Test | `mise run test` | Unit + integration tests (`-race -cover`) |
 | E2E | `mise run test-e2e` | MinIO E2E tests (`//go:build e2e`) |
-| Dev | `mise run dev` | overmind: MinIO + setup + simulate |
+| Dev | `mise run dev` | overmind: MinIO + setup + air HTTP UI (`:8080`) |
 | Simulate | `mise run simulate` | Simulation against MinIO only |
 | Tigris | `mise run simulate-tigris` | Simulation against Tigris |
 | MinIO setup | `mise run minio-setup` | Create bucket (MinIO must be running) |

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gedung Peristiwa — MVP Dev</title>
+  <style>
+    :root { --ok: #1a7f37; --err: #cf222e; --bg: #0d1117; --card: #161b22; --text: #e6edf3; --muted: #8b949e; --border: #30363d; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 1.5rem; line-height: 1.5; }
+    h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+    .sub { color: var(--muted); margin-bottom: 1.5rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+    .card h2 { margin: 0 0 0.75rem; font-size: 1.1rem; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+    .badge-ok { background: #23863633; color: #3fb950; }
+    .badge-err { background: #da363333; color: #f85149; }
+    .err { color: #f85149; background: #da363322; padding: 0.5rem; border-radius: 4px; margin: 0.5rem 0; font-size: 0.9rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    td, th { padding: 0.25rem 0; text-align: left; }
+    th { color: var(--muted); }
+    .actions { margin-top: 1rem; }
+    button { background: #238636; color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button:hover:not(:disabled) { background: #2ea043; }
+    .running { color: #d2a8ff; margin-bottom: 1rem; }
+    footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; }
+  </style>
+  <script>setTimeout(() => location.reload(), 5000);</script>
+</head>
+<body>
+  <h1>Gedung Peristiwa — MVP Dev</h1>
+  <p class="sub">MinIO + Tigris IsleDB status · trigger simulation · auto-refresh 5s</p>
+  {{if .Running}}<p class="running">⏳ Simulation running…</p>{{end}}
+  <div class="grid">
+    {{template "backendCard" (backendCard "MinIO" "/api/simulate/minio" .MinIO .Running)}}
+    {{template "backendCard" (backendCard "Tigris" "/api/simulate/tigris" .Tigris .Running)}}
+  </div>
+  <footer>Updated {{fmtTime .UpdatedAt}} · <a href="/api/status" style="color:#58a6ff">JSON status</a></footer>
+</body>
+</html>
+
+{{define "backendCard"}}
+<div class="card">
+  <h2>{{.Name}}
+    {{if .BV.Status.OK}}<span class="badge badge-ok">connected</span>{{else}}<span class="badge badge-err">error</span>{{end}}
+  </h2>
+  <table>
+    <tr><th>Bucket</th><td>{{.BV.Status.Bucket}}</td></tr>
+    <tr><th>Endpoint</th><td>{{.BV.Status.Endpoint}}</td></tr>
+    <tr><th>Total keys</th><td>{{.BV.Status.TotalKeys}}</td></tr>
+  </table>
+  {{if not .BV.Status.OK}}<div class="err">{{.BV.Status.Error}}</div>{{end}}
+  {{if .BV.Status.KeysByTenant}}
+  <table style="margin-top:0.5rem">
+    <tr><th>Tenant</th><th>Keys</th></tr>
+    {{range $tid, $n := .BV.Status.KeysByTenant}}
+    <tr><td>{{$tid}}</td><td>{{$n}}</td></tr>
+    {{end}}
+  </table>
+  {{end}}
+  {{if .BV.LastRun}}
+  <h3 style="margin-top:1rem;font-size:0.95rem">Last simulation</h3>
+  {{if .BV.LastRun.OK}}<span class="badge badge-ok">passed</span>{{else}}<span class="badge badge-err">failed</span>{{end}}
+  <span style="color:var(--muted);font-size:0.8rem"> {{fmtTime .BV.LastRun.FinishedAt}}</span>
+  {{if not .BV.LastRun.OK}}<div class="err">{{.BV.LastRun.Error}}</div>{{end}}
+  <table>
+    <tr><th>Puts</th><td>{{.BV.LastRun.PutCount}}</td></tr>
+    <tr><th>Unique</th><td>{{.BV.LastRun.UniqueExpected}}</td></tr>
+    <tr><th>Pre-compact</th><td>{{.BV.LastRun.PreCompactKeys}}</td></tr>
+    <tr><th>Post-compact</th><td>{{.BV.LastRun.PostCompactKeys}}</td></tr>
+  </table>
+  {{else}}
+  <p style="color:var(--muted);font-size:0.85rem;margin-top:1rem">No simulation run yet.</p>
+  {{end}}
+  <form class="actions" method="post" action="{{.Action}}">
+    <button type="submit" {{if .Running}}disabled{{end}}>Run {{.Name}} simulation</button>
+  </form>
+</div>
+{{end}}

@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/leow/go-gedung-peristiwa/internal/eventgen"
 	"github.com/leow/go-gedung-peristiwa/internal/pipeline"
+	"github.com/leow/go-gedung-peristiwa/internal/simulation"
 )
 
 func main() {
@@ -34,87 +34,32 @@ func run() int {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
-	b := pipeline.Backend(*backend)
-	cfg := pipeline.StoreConfigFromEnv(b, *prefixSuffix)
+	opts := simulation.Options{
+		Backend:      pipeline.Backend(*backend),
+		Duration:     *duration,
+		Events:       *events,
+		PrefixSuffix: *prefixSuffix,
+		Fast:         *fast,
+	}
 
 	logger.Info("starting simulation",
-		"backend", b,
-		"duration", duration,
-		"events", *events,
-		"prefix_suffix", *prefixSuffix,
+		"backend", opts.Backend,
+		"duration", opts.Duration,
+		"events", opts.Events,
+		"prefix_suffix", opts.PrefixSuffix,
 	)
 
-	genCfg := eventgen.DefaultConfig()
-	genCfg.TotalUnique = *events
-	genCfg.Duration = *duration
-	genCfg.NoDelay = *fast
-
-	var emissions []eventgen.Emission
-	var err error
-	if *fast {
-		emissions, err = eventgen.FastRun(ctx, genCfg)
-	} else {
-		emissions, err = eventgen.Run(ctx, genCfg)
-	}
-	if err != nil {
-		logger.Error("event generation failed", "err", err)
-		return 1
-	}
-	logger.Info("events generated", "total_writes", len(emissions), "unique", len(eventgen.ExpectedKeys(emissions)))
-
-	p, err := pipeline.New(ctx, cfg, pipeline.AllTenantIDs)
-	if err != nil {
-		logger.Error("pipeline init failed", "err", err)
-		return 1
-	}
-	defer func() {
-		if err := p.Close(context.Background()); err != nil {
-			logger.Error("pipeline close", "err", err)
-		}
-	}()
-
-	puts, err := p.WriteEmissions(emissions)
-	if err != nil {
-		logger.Error("write failed", "err", err)
-		return 1
-	}
-	logger.Info("writes complete", "puts", puts)
-
-	if err := p.FlushAll(ctx); err != nil {
-		logger.Error("flush failed", "err", err)
-		return 1
-	}
-
-	preKeys, err := p.CountKeys(ctx)
-	if err != nil {
-		logger.Error("pre-compact scan failed", "err", err)
-		return 1
-	}
-	logger.Info("pre-compaction keys", "count", preKeys)
-
-	if err := p.CompactAll(ctx); err != nil {
-		logger.Error("compaction failed", "err", err)
-		return 1
-	}
-
-	postKeys, err := p.CountKeys(ctx)
-	if err != nil {
-		logger.Error("post-compact scan failed", "err", err)
-		return 1
-	}
-	logger.Info("post-compaction keys", "count", postKeys)
-
-	result, err := p.Verify(ctx, emissions)
-	if err != nil {
-		logger.Error("verification failed", "err", err)
+	res := simulation.Run(ctx, opts)
+	if !res.OK {
+		logger.Error("simulation failed", "err", res.Error)
 		return 1
 	}
 
 	logger.Info("verification ok",
-		"puts", result.PutCount,
-		"unique_expected", result.UniqueKeysExpected,
-		"pre_compact_keys", preKeys,
-		"post_compact_keys", postKeys,
+		"puts", res.PutCount,
+		"unique_expected", res.UniqueExpected,
+		"pre_compact_keys", res.PreCompactKeys,
+		"post_compact_keys", res.PostCompactKeys,
 	)
 
 	fmt.Println("✅ Simulation passed")

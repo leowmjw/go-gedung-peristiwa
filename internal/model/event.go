@@ -69,7 +69,7 @@ func TenantUpperBound(tenantID string) []byte {
 
 // TypePrefix returns scan prefix for tenant + event type.
 func TypePrefix(tenantID string, eventType EventType) []byte {
-	return []byte(fmt.Sprintf("%s:%s:", tenantID, eventType))
+	return fmt.Appendf(nil, "%s:%s:", tenantID, eventType)
 }
 
 // TypeUpperBound returns exclusive upper bound for tenant + type scans.

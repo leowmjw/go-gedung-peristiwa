@@ -61,13 +61,44 @@ func openStore(ctx context.Context, cfg StoreConfig, tenantID string) (*blobstor
 	case BackendMemory:
 		return blobstore.NewMemory(prefix), nil
 	case BackendMinIO:
+		ensureS3Env(cfg)
+		if err := ensureBucket(ctx, cfg); err != nil {
+			return nil, fmt.Errorf("ensure bucket: %w", err)
+		}
 		url := minioBucketURL(cfg.MinBucket, cfg.MinEndpoint)
 		return blobstore.Open(ctx, url, prefix)
 	case BackendTigris:
+		ensureS3Env(cfg)
+		if err := ensureBucket(ctx, cfg); err != nil {
+			return nil, fmt.Errorf("ensure bucket: %w", err)
+		}
 		url := tigrisBucketURL(cfg.TigrisBucket)
 		return blobstore.Open(ctx, url, prefix)
 	default:
 		return nil, fmt.Errorf("unknown backend %q", cfg.Backend)
+	}
+}
+
+// ensureS3Env maps MinIO credentials to AWS env vars for gocloud s3blob.
+func ensureS3Env(cfg StoreConfig) {
+	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
+		if v := os.Getenv("MINIO_ACCESS_KEY"); v != "" {
+			os.Setenv("AWS_ACCESS_KEY_ID", v)
+		}
+	}
+	if os.Getenv("AWS_SECRET_ACCESS_KEY") == "" {
+		if v := os.Getenv("MINIO_SECRET_KEY"); v != "" {
+			os.Setenv("AWS_SECRET_ACCESS_KEY", v)
+		}
+	}
+	if cfg.Backend == BackendMinIO {
+		os.Setenv("AWS_S3_USE_PATH_STYLE", "true")
+		if os.Getenv("AWS_REGION") == "" {
+			os.Setenv("AWS_REGION", "us-east-1")
+		}
+	}
+	if os.Getenv("AWS_REGION") == "" && cfg.Backend == BackendTigris {
+		os.Setenv("AWS_REGION", "auto")
 	}
 }
 

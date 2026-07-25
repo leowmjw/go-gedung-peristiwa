@@ -1,5 +1,6 @@
 [tools]
 go = "1.26"
+air = "latest"
 
 [env]
 _.file = ".env"
@@ -119,7 +120,7 @@ description = "E2E tests (requires MinIO)"
 run = "go test -race -tags=e2e ./test/e2e/..."
 
 [tasks.dev]
-description = "Start MinIO + simulation via overmind"
+description = "Start MinIO + dev HTTP UI (air reload) via overmind"
 run = "overmind start"
 
 [tasks.simulate]
