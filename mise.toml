@@ -1,0 +1,149 @@
+[tools]
+go = "1.26"
+
+[env]
+MINIO_ENDPOINT = "localhost:9000"
+MINIO_ACCESS_KEY = "minioadmin"
+MINIO_SECRET_KEY = "minioadmin"
+MINIO_BUCKET = "gedung-peristiwa"
+MINIO_USE_SSL = "false"
+AWS_ACCESS_KEY_ID = "minioadmin"
+AWS_SECRET_ACCESS_KEY = "minioadmin"
+AWS_REGION = "us-east-1"
+
+[tasks.doctor]
+description = "Check for all required prerequisites"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+PASS=0
+FAIL=0
+WARN=0
+
+check() {
+  local name="$1"
+  local cmd="$2"
+  if command -v "$cmd" &>/dev/null; then
+    local version
+    version=$("$cmd" --version 2>/dev/null | head -1 || echo "installed")
+    printf "  ✅ %-20s %s\\n" "$name" "$version"
+    PASS=$((PASS + 1))
+  else
+    printf "  ❌ %-20s not found\\n" "$name"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+check_optional() {
+  local name="$1"
+  local cmd="$2"
+  if command -v "$cmd" &>/dev/null; then
+    local version
+    version=$("$cmd" --version 2>/dev/null | head -1 || echo "installed")
+    printf "  ✅ %-20s %s\\n" "$name" "$version"
+    PASS=$((PASS + 1))
+  else
+    printf "  ⚠️  %-20s not found (optional)\\n" "$name"
+    WARN=$((WARN + 1))
+  fi
+}
+
+echo ""
+echo "🏥 Gedung Peristiwa — Doctor"
+echo "============================"
+echo ""
+
+echo "🔧 Required tools:"
+check "go"          "go"
+check "mise"        "mise"
+check "overmind"    "overmind"
+check "minio"       "minio"
+
+echo ""
+echo "🔧 Optional tools:"
+check_optional "tigris"       "tigris"
+check_optional "ripgrep"      "rg"
+check_optional "fzf"          "fzf"
+check_optional "air"          "air"
+check_optional "watchexec"    "watchexec"
+
+echo ""
+echo "🔧 Go version check:"
+GO_VERSION=$(go version 2>/dev/null | awk '{print $3}' || echo "unknown")
+if [[ "$GO_VERSION" == go1.26* ]]; then
+  printf "  ✅ %-20s %s\\n" "Go 1.26.x" "$GO_VERSION"
+else
+  printf "  ⚠️  %-20s got %s (expected go1.26.x)\\n" "Go version" "$GO_VERSION"
+  WARN=$((WARN + 1))
+fi
+
+echo ""
+echo "🔧 Environment:"
+if [ -n "${MINIO_ENDPOINT:-}" ]; then
+  printf "  ✅ %-20s %s\\n" "MINIO_ENDPOINT" "$MINIO_ENDPOINT"
+else
+  printf "  ❌ %-20s not set\\n" "MINIO_ENDPOINT"
+  FAIL=$((FAIL + 1))
+fi
+
+if [ -n "${MINIO_ACCESS_KEY:-}" ]; then
+  printf "  ✅ %-20s %s\\n" "MINIO_ACCESS_KEY" "(set)"
+else
+  printf "  ❌ %-20s not set\\n" "MINIO_ACCESS_KEY"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "📊 Summary: $PASS passed, $FAIL failed, $WARN warnings"
+
+if [ "$FAIL" -gt 0 ]; then
+  echo ""
+  echo "💡 Install missing tools:"
+  echo "   brew install minio/stable/minio overmind"
+  echo "   brew install tigrisdata/tap/tigris  # optional"
+  echo "   brew install ripgrep fzf watchexec  # optional"
+  echo ""
+  exit 1
+fi
+
+echo ""
+echo "✨ All prerequisites satisfied!"
+"""
+
+[tasks.test]
+description = "Run all tests with race detection"
+run = "go test -v -race -cover ./..."
+
+[tasks.simulate]
+description = "Run the 60s multi-tenant event simulation"
+run = "go run ./cmd/simulate/"
+
+[tasks.minio-setup]
+description = "Create the MinIO bucket for local development"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "⏳ Waiting for MinIO to be ready..."
+for i in $(seq 1 30); do
+  if curl -sf "http://${MINIO_ENDPOINT}/minio/health/live" >/dev/null 2>&1; then
+    echo "✅ MinIO is ready"
+    break
+  fi
+  sleep 1
+done
+
+# Use mc (MinIO client) if available, otherwise use AWS CLI
+if command -v mc &>/dev/null; then
+  mc alias set local "http://${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" 2>/dev/null || true
+  mc mb "local/${MINIO_BUCKET}" 2>/dev/null || echo "Bucket already exists"
+elif command -v aws &>/dev/null; then
+  aws --endpoint-url "http://${MINIO_ENDPOINT}" s3 mb "s3://${MINIO_BUCKET}" 2>/dev/null || echo "Bucket already exists"
+else
+  echo "⚠️  Neither mc nor aws CLI found. Create bucket manually."
+  exit 1
+fi
+
+echo "✅ Bucket '${MINIO_BUCKET}' is ready"
+"""

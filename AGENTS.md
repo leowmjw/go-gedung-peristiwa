@@ -27,6 +27,11 @@ routing, testing/synctest
  external dependencies
 - Only Full End-to-End should need to stand up Temporal Test Server
 
+## Data Location
+
+- Any persistence store locally can store in the data folder; create if not available
+- If scratch pad or data; can use the tmp folder 
+
 ## Tools
 
 - Use mise to run tasks, set env variables, automate
@@ -35,6 +40,7 @@ routing, testing/synctest
 
 ## Specification (MVP)
 
+- Follow PRD.md for high level business objective
 - Follow TECHSPEC.md for suggested details but it MUST NOT override what stated here
 - Ask if anything unsure or contradictory
 
@@ -44,5 +50,19 @@ routing, testing/synctest
 
 ## Implementation Status & Learnings
 
-<TODO>
+### Phase 1: Documentation & Setup (DONE)
+- PRD.md written — covers vision, problem statement, solution, MVP scope, success criteria
+- TECHSPEC.md written — architecture, component design, event generation, testing strategy, tradeoffs
+- mise.toml created — env vars, doctor task, test task, simulate task, minio-setup task
+- Procfile created — overmind manages MinIO
+
+### Phase 2: Implementation (TODO)
+- [ ] Add IsleDB + Tigris SDK dependencies to go.mod
+- [ ] Implement internal/model/ (Event types)
+- [ ] Implement internal/eventgen/ (multi-tenant event generator with traffic patterns)
+- [ ] Implement internal/pipeline/ (IsleDB writer/reader/tailer wrappers)
+- [ ] Implement cmd/simulate/ (main simulation binary)
+- [ ] Write unit tests with blobstore.NewMemory()
+- [ ] Write integration tests (full pipeline)
+- [ ] E2E test with MinIO via overmind
 
