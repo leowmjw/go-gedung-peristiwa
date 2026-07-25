@@ -2,14 +2,7 @@
 go = "1.26"
 
 [env]
-MINIO_ENDPOINT = "localhost:9000"
-MINIO_ACCESS_KEY = "minioadmin"
-MINIO_SECRET_KEY = "minioadmin"
-MINIO_BUCKET = "gedung-peristiwa"
-MINIO_USE_SSL = "false"
-AWS_ACCESS_KEY_ID = "minioadmin"
-AWS_SECRET_ACCESS_KEY = "minioadmin"
-AWS_REGION = "us-east-1"
+_.file = ".env"
 
 [tasks.doctor]
 description = "Check for all required prerequisites"
@@ -79,7 +72,14 @@ else
 fi
 
 echo ""
-echo "🔧 Environment:"
+echo "🔧 Environment (from .env via mise):"
+if [ -f .env ]; then
+  printf "  ✅ %-20s found\\n" ".env"
+else
+  printf "  ⚠️  %-20s missing — copy .env.example to .env\\n" ".env"
+  WARN=$((WARN + 1))
+fi
+
 if [ -n "${MINIO_ENDPOINT:-}" ]; then
   printf "  ✅ %-20s %s\\n" "MINIO_ENDPOINT" "$MINIO_ENDPOINT"
 else
@@ -88,7 +88,7 @@ else
 fi
 
 if [ -n "${MINIO_ACCESS_KEY:-}" ]; then
-  printf "  ✅ %-20s %s\\n" "MINIO_ACCESS_KEY" "(set)"
+  printf "  ✅ %-20s (set)\\n" "MINIO_ACCESS_KEY"
 else
   printf "  ❌ %-20s not set\\n" "MINIO_ACCESS_KEY"
   FAIL=$((FAIL + 1))
@@ -101,8 +101,7 @@ if [ "$FAIL" -gt 0 ]; then
   echo ""
   echo "💡 Install missing tools:"
   echo "   brew install minio/stable/minio overmind"
-  echo "   brew install tigrisdata/tap/tigris  # optional"
-  echo "   brew install ripgrep fzf watchexec  # optional"
+  echo "   cp .env.example .env"
   echo ""
   exit 1
 fi
@@ -112,12 +111,24 @@ echo "✨ All prerequisites satisfied!"
 """
 
 [tasks.test]
-description = "Run all tests with race detection"
-run = "go test -v -race -cover ./..."
+description = "Run unit and integration tests"
+run = "go test -race -cover ./..."
+
+[tasks.test-e2e]
+description = "E2E tests (requires MinIO)"
+run = "go test -race -tags=e2e ./test/e2e/..."
+
+[tasks.dev]
+description = "Start MinIO + simulation via overmind"
+run = "overmind start"
 
 [tasks.simulate]
-description = "Run the 60s multi-tenant event simulation"
-run = "go run ./cmd/simulate/"
+description = "Run simulation against MinIO"
+run = "go run ./cmd/simulate/ --backend minio"
+
+[tasks.simulate-tigris]
+description = "Run simulation against Tigris"
+run = "go run ./cmd/simulate/ --backend tigris"
 
 [tasks.minio-setup]
 description = "Create the MinIO bucket for local development"
@@ -134,7 +145,6 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# Use mc (MinIO client) if available, otherwise use AWS CLI
 if command -v mc &>/dev/null; then
   mc alias set local "http://${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" 2>/dev/null || true
   mc mb "local/${MINIO_BUCKET}" 2>/dev/null || echo "Bucket already exists"
@@ -147,3 +157,7 @@ fi
 
 echo "✅ Bucket '${MINIO_BUCKET}' is ready"
 """
+
+[tasks.lint]
+description = "Run go vet"
+run = "go vet ./..."

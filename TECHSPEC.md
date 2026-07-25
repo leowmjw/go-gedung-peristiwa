@@ -58,7 +58,7 @@ graph TD
 
 1. **Write path**: Event generators produce events → IsleDB Writer buffers in memtable → flushes SST files to object storage bucket under a tenant-specific prefix.
 2. **Read path**: IsleDB Reader opens a snapshot of the manifest and reads SSTs from object storage. `Refresh()` picks up new SSTs.
-3. **Tailing path**: IsleDB TailingReader polls for new ChangeFeed entries under `changes/`, providing ordered replay of mutations.
+3. **Tailing path**: IsleDB `TailingReader` polls manifest/SST visibility and emits new keys in order (`Tail()` / `CatchUp()`). ChangeFeed under `changes/` is enabled for audit but is not the primary MVP tail mechanism.
 4. **Maintenance**: Compaction merges small SSTs, applies age-based or time-window retention, and rewrites the manifest — all via CAS operations on the object store.
 
 ---
@@ -84,12 +84,14 @@ IsleDB enforces a single writer per prefix via epoch fencing. This is a feature,
 ### Key Format
 
 ```
-{tenant_id}:{event_type}:{timestamp_ns}:{uuid}
+{tenant_id}:{event_type}:{idempotency_key}
 ```
 
-- **Natural ordering**: Keys sort by tenant → event type → time → unique ID
-- **Range scans**: `Scan("tenant-alpha:transaction:", "tenant-alpha:transaction:\xff")` returns all transactions for a tenant in time order
-- **Deduplication**: Same idempotency key maps to the same KV key; LSM compaction collapses duplicates
+- **idempotency_key**: UUID v7 (`uuid.NewV7()`), assigned at first emit; retries reuse the same key
+- **Natural ordering**: UUID v7 high-order timestamp bits make keys lexicographically sort by creation time (millisecond granularity; monotonic within same ms via Go's `NewV7()` counter)
+- **Range scans**: `Scan("tenant-alpha:transaction:", "tenant-alpha:transaction:\xff")` returns transactions in UUID v7 order
+- **Deduplication**: Same idempotency key → same KV key; LSM compaction collapses duplicate writes
+- **Ordering verification**: Scan unique keys in prefix; assert lexicographic order matches first-emission generation order (exclude duplicate retries)
 
 ### Value Format
 
@@ -315,7 +317,7 @@ graph TD
   3. Flush and close writers
   4. Open readers, verify all events present
   5. Open tailers, verify ordered replay via ChangeFeed
-- **Determinism**: `RegisterDelayedCallback` in Temporal test suite for workflow timing; `synctest` for pipeline timing
+- **Determinism**: `testing/synctest` for pipeline and eventgen timing
 - **Assertions**: Event count, ordering (timestamp monotonicity within tenant+type), deduplication after compaction
 
 ### E2E Simulation
@@ -353,27 +355,78 @@ Target: 80%+ overall
 | overmind | Process manager | `brew install overmind` |
 | mise | Task runner | `brew install mise` |
 
-### Environment Variables
+### Environment configuration (mise + `.env`)
+
+All runtime env vars are loaded from **`.env`** via mise — not hardcoded in `mise.toml`.
+
+**`mise.toml`** (project root):
+
+```toml
+[tools]
+go = "1.26"
+
+[env]
+_.file = ".env"
+
+[tasks.dev]
+description = "Start MinIO + simulation via overmind"
+run = "overmind start"
+
+[tasks.simulate]
+description = "Run simulation against MinIO"
+run = "go run ./cmd/simulate/ --backend minio"
+
+[tasks.simulate-tigris]
+description = "Run simulation against Tigris (requires credentials in .env)"
+run = "go run ./cmd/simulate/ --backend tigris"
+
+[tasks.test]
+run = "go test -race -cover ./..."
+
+[tasks.test-e2e]
+description = "E2E tests (requires MinIO)"
+run = "go test -race -tags=e2e ./test/e2e/..."
+```
+
+**`.env.example`** (committed; copy to `.env`):
 
 ```bash
-# .mise.toml or .env
+# MinIO (local)
 MINIO_ENDPOINT=localhost:9000
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 MINIO_BUCKET=gedung-peristiwa
 MINIO_USE_SSL=false
+
+# S3 client defaults for MinIO (used by IsleDB blobstore + aws cli)
+AWS_ACCESS_KEY_ID=minioadmin
+AWS_SECRET_ACCESS_KEY=minioadmin
+AWS_REGION=us-east-1
+
+# Tigris (fill for simulate-tigris only)
+TIGRIS_BUCKET=gedung-peristiwa
+# AWS_ACCESS_KEY_ID=<tigris-access-key>
+# AWS_SECRET_ACCESS_KEY=<tigris-secret-key>
+# AWS_REGION=auto
 ```
+
+**Notes:**
+- `.env` is gitignored; `.env.example` is the template (already in [.gitignore](.gitignore))
+- `mise run <task>` and `mise exec` inject vars from `.env` automatically
+- `overmind start` should run from a mise-activated shell (`mise trust` + hook) or via `mise run dev`
+- Optional local overrides: `_.file = [".env", ".env.local"]` (both gitignored except example)
+- Remove inline `[env] MINIO_*` defaults from current [mise.toml](mise.toml) — they belong in `.env`
 
 ### IsleDB Connection String
 
 ```go
 // Local development (MinIO)
 store, err := blobstore.Open(ctx,
-    "s3://gedung-peristiwa?endpoint=localhost:9000&disableSSL=true&s3ForcePathStyle=true",
+    "s3://gedung-peristiwa?endpoint=http://localhost:9000&region=us-east-1&use_path_style=true",
     tenantPrefix,
 )
 
-// Production (Tigris)
+// Tigris (S3-compatible API via IsleDB blobstore)
 store, err := blobstore.Open(ctx,
     "s3://gedung-peristiwa?region=auto",
     tenantPrefix,
@@ -386,33 +439,22 @@ store := blobstore.NewMemory(tenantPrefix)
 ### Procfile (overmind)
 
 ```procfile
-minio: minio server ./data --console-address :9001
-simulate: go run ./cmd/simulate/
+minio: minio server ./data/minio --address :9000 --console-address :9001
+setup: mise run minio-setup
+simulate: go run ./cmd/simulate/ --backend minio
 ```
 
 ### mise Tasks
 
 ```toml
-# mise.toml
-[tasks.doctor]
-description = "Check prerequisites"
-run = """
-go version
-minio --version
-overmind version
-"""
-
 [tasks.test]
-description = "Run unit + integration tests"
 run = "go test -race -cover ./..."
 
 [tasks.simulate]
-description = "Run full E2E simulation"
 run = "overmind start"
 
-[tasks.lint]
-description = "Run linter"
-run = "go vet ./..."
+[tasks.simulate-tigris]
+run = "go run ./cmd/simulate/ --backend tigris"
 ```
 
 ---
@@ -425,7 +467,7 @@ run = "go vet ./..."
 | **Read latency** | 1-10s acceptable (reader must `Refresh()` to see new SSTs) | Suitable for analytics, audit, compliance — not for real-time trading or sub-10ms reads |
 | **No transactions/joins** | IsleDB is a KV store, not an OLTP database | Not replacing PostgreSQL; complementing it for event storage and replay |
 | **Eventual dedup** | Duplicates exist between compaction runs | Consumers must tolerate brief duplicates or use idempotency keys for at-most-once processing |
-| **Tailing is polling** | `TailingReader.Tail()` polls for new ChangeFeed entries | Not true push/streaming like Kafka consumer groups; adequate for audit/replay workloads |
+| **Tailing is polling** | `TailingReader.Tail()` polls manifest/SST changes | Not true push/streaming like Kafka consumer groups; adequate for audit/replay workloads |
 | **Local vs. prod parity** | MinIO lacks Tigris features (snapshots, metadata query) | Tests use `blobstore.NewMemory()`; Tigris-specific features tested only in staging/prod |
 | **JSON payloads** | Human-readable but larger than binary formats | Acceptable for MVP; switch to protobuf if payload size becomes a bottleneck |
 | **No schema evolution** | JSON fields can be added but not removed safely | Use optional fields with `omitempty`; formal schema registry is out of scope |
@@ -440,10 +482,10 @@ run = "go vet ./..."
 go 1.26.5
 
 require (
-    github.com/ankur-anand/isledb        latest   // Embedded LSM-tree on object storage
-    github.com/tigrisdata/storage-go      latest   // Tigris SDK (future Tigris-specific features)
-    github.com/google/uuid                latest   // UUID v7 for idempotency keys
+    github.com/ankur-anand/isledb   v0.4.2   // Embedded LSM-tree on object storage
+    github.com/google/uuid            latest   // UUID v7 idempotency keys
 )
+// Deferred: github.com/tigrisdata/storage-go (Tigris-specific APIs beyond S3)
 ```
 
 ### Infrastructure
@@ -453,7 +495,7 @@ require (
 | Object Storage | MinIO (`minio server ./data`) | Tigris (`t3.storage.dev`) |
 | Process Manager | overmind | systemd / container orchestrator |
 | Task Runner | mise | mise (CI) |
-| Workflow Engine | Temporal CLI (`temporal server start-dev`) | Temporal Cloud |
+| Workflow Engine | — (MVP) | Temporal Cloud (Advanced) |
 
 ### Dev Tools
 
@@ -470,10 +512,10 @@ require (
 ## Appendix: Key Format Examples
 
 ```
-tenant-alpha:transaction:1737849600000000000:0192b3a4-5c6d-7e8f-9a0b-1c2d3e4f5a6b
-tenant-alpha:transaction:1737849601000000000:0192b3a4-6d7e-8f9a-0b1c-2d3e4f5a6b7c
-tenant-alpha:balance_check:1737849600500000000:0192b3a4-7e8f-9a0b-1c2d-3e4f5a6b7c8d
-tenant-beta:fraud_alert:1737849602000000000:0192b3a4-8f9a-0b1c-2d3e-4f5a6b7c8d9e
+tenant-alpha:transaction:01932e40-7c6d-7e8f-9a0b-1c2d3e4f5a6b
+tenant-alpha:transaction:01932e40-8d7e-8f9a-0b1c-2d3e4f5a6b7c
+tenant-alpha:balance_check:01932e40-7e8f-9a0b-1c2d-3e4f5a6b7c8d
+tenant-beta:fraud_alert:01932e40-8f9a-0b1c-2d3e-4f5a6b7c8d9e
 ```
 
 Scanning all transactions for tenant-alpha:

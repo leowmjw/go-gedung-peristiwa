@@ -72,44 +72,45 @@ IsleDB implements an LSM-tree adapted for object storage:
 
 ## MVP Scope
 
-The MVP is a fully local, standalone simulation that proves the core write → flush → read → tail pipeline.
+The MVP proves the core write → flush → read → tail pipeline locally (MinIO), then validates the same pipeline against Tigris (S3 API) with read-back verification.
 
 ### What It Does
 
 1. **Multi-tenant event generation** — Simulates 1000 events over 60 seconds across multiple tenants.
 2. **Realistic traffic patterns** — Includes spikes, plateaus, and varying per-tenant throughput.
-3. **Write → flush → read → tail pipeline** — Events are written via IsleDB, flushed to MinIO, and consumed by tailing readers.
-4. **Event ordering guarantees** — Readers observe events in the order they were written.
+3. **Write → flush → read → tail pipeline** — Events written via IsleDB, flushed to object storage (MinIO then Tigris), consumed by tailing readers.
+4. **Event ordering guarantees** — Unique event keys (UUID v7 idempotency keys) are observed in lexicographic (time) order within each tenant prefix.
 5. **Basic deduplication via compaction** — LSM compaction merges duplicate keys, demonstrating automatic dedup.
+6. **Tigris validation** — After MinIO passes, run the same simulation against a Tigris bucket and confirm data correctness (counts, ordering, dedup).
 
 ### What It Requires
 
 - Go binary (single process)
-- MinIO (local S3-compatible object store)
-- Managed by overmind (MinIO + simulation run together)
+- MinIO (local S3-compatible object store), managed by overmind
+- Tigris account credentials (for optional `simulate-tigris` step only)
 
 ### What It Does NOT Require
 
-- No cloud accounts or credentials
-- No external databases
 - No container orchestration
-- No network dependencies beyond localhost
+- No external databases beyond object storage
+- MinIO path: no cloud credentials; network limited to localhost
 
 ## Success Criteria
 
 | Criterion | Verification |
 |---|---|
-| All 1000 events written and readable | Reader can retrieve every event by key |
-| Tailing reader receives events in correct order | Sequence numbers are monotonically increasing |
-| Compaction reduces duplicate keys | Post-compaction key count < pre-compaction key count (when duplicates exist) |
-| No data loss across writer/reader boundary | Writer event count == reader event count |
-| Runs fully standalone | `overmind start` brings up the complete system with no manual steps |
+| All 1000 events written and readable | Reader can retrieve every unique event by key |
+| Tailing reader receives events in correct order | Unique UUID v7 keys are lexicographically non-decreasing within tenant+type prefix |
+| Compaction reduces duplicate keys | Post-compaction unique key count < pre-compaction put count when duplicates exist |
+| No data loss across writer/reader boundary | Unique reader key count == unique generated events (after compaction) |
+| Runs fully standalone (MinIO) | `overmind start` brings up MinIO + simulation with no manual steps |
+| Tigris data matches MinIO behavior | `simulate-tigris` passes same verification against Tigris bucket |
 
 ## Non-Goals (MVP)
 
 The following are explicitly out of scope for the MVP:
 
-- **Production Tigris deployment** — MVP runs entirely on local MinIO.
+- **Multi-region / production Tigris operations** — MVP only writes to one Tigris bucket and verifies data; not full prod rollout.
 - **Multi-node IsleDB** — Single writer, single process only.
 - **Authentication / authorization** — No tenant isolation or access control.
 - **Schema registry** — Events are opaque key-value pairs.
