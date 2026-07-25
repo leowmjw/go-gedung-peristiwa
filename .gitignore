@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Ignore binary
+bin/
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -32,4 +35,11 @@ go.work.sum
 
 # Ignore Overmind or Air (?)  folders ..
 tmp
+temp
+
+# Ignore mise
+mise.local.toml
+
+# Ignore archivals
+ARCHIVE
 

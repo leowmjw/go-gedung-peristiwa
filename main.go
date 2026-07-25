@@ -2,7 +2,7 @@ package main
 
 import "fmt"
 
-func main() {
-	fmt.Println("Go Gedung Peristiwa!! Goodbye!! Hello!!")
+func main() { 
+	fmt.Println("Testing Colabs BuildClub!!")
 
 }
