@@ -156,9 +156,7 @@ echo "========== MINIO (S3-compatible local) =========="
 mise run minio-setup
 go run ./cmd/isledb-debug/ --backend minio --prefix-suffix "cmp-minio-$(date +%s)"
 echo ""
-echo "Compare visibility first_full row + incremental tail_events/timeouts above."
-echo "If memory OK but MinIO/Tigris slow/timeout → object-store visibility issue."
-echo "If all backends fail incremental → likely IsleDB TailingReader or harness bug."
+echo "Read the === summary [backend] === blocks above (PASS/FAIL/INFO per experiment)."
 """
 
 [tasks.simulate]

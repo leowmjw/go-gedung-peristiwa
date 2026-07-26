@@ -7,4 +7,7 @@ cd "$(dirname "$0")/.."
 # processes when a one-shot Procfile entry exits.
 mise run minio-setup
 
+# Orphan ./tmp/dev from a prior air/overmind session holds DEV_HTTP_ADDR.
+"$(dirname "$0")/free-dev-port.sh"
+
 exec mise exec -- air -c .air.toml

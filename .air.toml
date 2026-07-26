@@ -7,6 +7,8 @@ tmp_dir = "tmp"
   include_ext = ["go", "html", "tpl"]
   exclude_dir = ["data", "tmp", "ARCHIVE", ".git"]
   delay = 500
+  send_interrupt = true
+  kill_delay = 500
 
 [log]
   time = false

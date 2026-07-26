@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -47,8 +48,12 @@ func (s *Server) ListenAndServe() error {
 	mux.HandleFunc("/api/simulate/minio", s.handleSimulateMinIO)
 	mux.HandleFunc("/api/simulate/tigris", s.handleSimulateTigris)
 
-	slog.Info("dev server listening", "addr", s.addr)
-	return http.ListenAndServe(s.addr, mux)
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
+	}
+	slog.Info("dev server listening", "addr", ln.Addr().String())
+	return http.Serve(ln, mux)
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
