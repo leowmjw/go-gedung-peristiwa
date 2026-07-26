@@ -3,11 +3,11 @@ package demo_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/leow/go-gedung-peristiwa/internal/gtfs"
-	demoweb "github.com/leow/go-gedung-peristiwa/internal/web/demo"
 )
 
 func TestVehicleStreamPushesPositions(t *testing.T) {
@@ -18,8 +18,8 @@ func TestVehicleStreamPushesPositions(t *testing.T) {
 	ch := make(chan struct{})
 	close(ch)
 
-	srv := demoweb.NewServer(&stubSource{positions: positions, polls: ch}, nil)
-	req := httptest.NewRequest(http.MethodGet, "/api/vehicles/stream", nil)
+	srv := newTestServer(&stubSource{positions: positions, polls: ch})
+	req := httptest.NewRequest(http.MethodGet, "/api/vehicles/stream?region=klang-valley", nil)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
@@ -41,7 +41,7 @@ func TestVehicleStreamPushesPositions(t *testing.T) {
 }
 
 func TestIndexNotFound(t *testing.T) {
-	srv := demoweb.NewServer(&stubSource{}, nil)
+	srv := newTestServer(&stubSource{})
 	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -50,14 +50,15 @@ func TestIndexNotFound(t *testing.T) {
 	}
 }
 
-func TestAgencyGroupViaIndex(t *testing.T) {
-	srv := demoweb.NewServer(&stubSource{}, []gtfs.Feed{
-		{Agency: "prasarana-rapid-bus-kl", Region: "KL"},
-	})
+func TestIndexRendersActiveRegionTenants(t *testing.T) {
+	srv := newTestServer(&stubSource{})
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "prasarana-rapid-bus-kl") {
+		t.Fatal("missing klang valley tenant")
 	}
 }

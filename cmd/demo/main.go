@@ -40,28 +40,37 @@ func run() int {
 		return 1
 	}
 
-	feeds := gtfs.KLFeeds()
+	allFeeds := gtfs.AllFeeds()
 	cfg := pipeline.StoreConfigFromEnv(b, "demo-kl")
 	cfg.CacheRoot = "tmp/cache/demo-kl"
 
-	pipe, err := demo.NewPipeline(ctx, cfg, feeds)
+	pipe, err := demo.NewPipeline(ctx, cfg, allFeeds)
 	if err != nil {
 		slog.Error("pipeline init failed", "err", err)
 		return 1
 	}
 	defer pipe.Close(context.Background())
 
+	sessions := demo.NewSessionStore()
+	coordinator := demo.NewPollCoordinator(sessions, *pollInterval)
 	poller := gtfs.DefaultPoller()
-	go pollLoop(ctx, *pollInterval, poller, feeds, pipe)
 
-	srv := demoweb.NewServer(pipe, feeds)
+	pollNow := make(chan string, 1)
+	go pollLoop(ctx, *pollInterval, poller, coordinator, pipe, pollNow)
+
+	srv := demoweb.NewServer(pipe, sessions, func(regionID string) {
+		select {
+		case pollNow <- regionID:
+		default:
+		}
+	})
 	httpSrv := &http.Server{
 		Addr:    *addr,
 		Handler: srv.Handler(),
 	}
 
 	go func() {
-		slog.Info("demo server listening", "addr", *addr, "backend", b, "feeds", len(feeds))
+		slog.Info("demo server listening", "addr", *addr, "backend", b, "feeds", len(allFeeds))
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("http server failed", "err", err)
 			cancel()
@@ -76,11 +85,17 @@ func run() int {
 	return 0
 }
 
-func pollLoop(ctx context.Context, interval time.Duration, poller *gtfs.Poller, feeds []gtfs.Feed, pipe *demo.Pipeline) {
+func pollLoop(ctx context.Context, interval time.Duration, poller *gtfs.Poller, coordinator *demo.PollCoordinator, pipe *demo.Pipeline, pollNow <-chan string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	pollOnce := func() {
+	runPoll := func(feeds []gtfs.Feed, regionIDs []string) {
+		if len(feeds) == 0 {
+			return
+		}
+		agencyIDs := gtfs.AgencyIDs(feeds)
+		pipe.SetLastPolledAgencies(agencyIDs)
+
 		results := poller.PollAll(ctx, feeds)
 		var all []gtfs.VehiclePosition
 		for _, res := range results {
@@ -106,18 +121,44 @@ func pollLoop(ctx context.Context, interval time.Duration, poller *gtfs.Poller, 
 			slog.Error("flush failed", "err", err)
 			return
 		}
-		pipe.SetLastPoll(time.Now())
+		now := time.Now()
+		pipe.SetLastPoll(now)
+		coordinator.MarkPolled(regionIDs, now)
 		pipe.NotifyPoll()
-		slog.Info("poll complete", "positions", puts)
+		slog.Info("poll complete", "positions", puts, "regions", regionIDs)
 	}
 
-	pollOnce()
+	scheduled := func() {
+		feeds, regions, err := coordinator.FeedsForScheduledPoll(time.Now())
+		if err != nil {
+			slog.Error("plan scheduled poll", "err", err)
+			return
+		}
+		runPoll(feeds, regions)
+	}
+
+	forRegion := func(regionID string) {
+		feeds, regions, err := coordinator.FeedsForRegionSwitch(time.Now(), regionID)
+		if err != nil {
+			slog.Error("plan region poll", "err", err, "region", regionID)
+			return
+		}
+		if len(feeds) == 0 {
+			slog.Debug("region poll skipped, cache fresh", "region", regionID)
+			return
+		}
+		runPoll(feeds, regions)
+	}
+
+	scheduled()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case regionID := <-pollNow:
+			forRegion(regionID)
 		case <-ticker.C:
-			pollOnce()
+			scheduled()
 		}
 	}
 }

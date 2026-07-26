@@ -29,6 +29,25 @@ func TestNotifyPoll(t *testing.T) {
 	}
 }
 
+func TestSubscribePollsNoReplayAfterPoll(t *testing.T) {
+	ctx := context.Background()
+	cfg := pipeline.StoreConfig{Backend: pipeline.BackendMemory, CacheRoot: t.TempDir()}
+	p, err := demo.NewPipeline(ctx, cfg, testFeeds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close(ctx)
+
+	p.SetLastPoll(time.Now())
+	sub := p.SubscribePolls(ctx)
+
+	select {
+	case <-sub:
+		t.Fatal("unexpected replay notification on subscribe")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestLatestPositions(t *testing.T) {
 	ctx := context.Background()
 	cfg := pipeline.StoreConfig{Backend: pipeline.BackendMemory, CacheRoot: t.TempDir()}

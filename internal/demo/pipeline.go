@@ -15,6 +15,18 @@ import (
 )
 
 const flushInterval = 5 * time.Second
+const ingestCap = 10
+
+// IngestRecord is one position written to IsleDB (debug ring buffer).
+type IngestRecord struct {
+	Agency      string
+	BucketID    string
+	BucketLabel string
+	VehicleID   string
+	Lat         float64
+	Lng         float64
+	At          time.Time
+}
 
 // Update is a vehicle position streamed from the tailing reader.
 type Update struct {
@@ -39,6 +51,8 @@ type Pipeline struct {
 	eventCount  int64
 	lastPoll    time.Time
 	vehicleSeen map[string]gtfs.VehiclePosition // latest per vehicle key agency:vehicle
+	ingestBuf   []IngestRecord
+	lastPolled  []string
 
 	notifyMu sync.Mutex
 	pollSubs []chan struct{}
@@ -136,6 +150,7 @@ func (p *Pipeline) Write(positions []gtfs.VehiclePosition) (int, error) {
 		if prev, ok := p.vehicleSeen[key]; !ok || pos.Timestamp.After(prev.Timestamp) {
 			p.vehicleSeen[key] = pos
 		}
+		p.recordIngest(pos)
 		p.mu.Unlock()
 	}
 	return puts, nil
@@ -199,6 +214,92 @@ func (p *Pipeline) Stats() (vehicleCount int, lastPoll time.Time, eventCount int
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.vehicleSeen), p.lastPoll, p.eventCount
+}
+
+func (p *Pipeline) recordIngest(pos gtfs.VehiclePosition) {
+	bucketID, bucketLabel := "", "Unknown"
+	if r, ok := gtfs.RegionForAgency(pos.Agency); ok {
+		bucketID = r.ID
+		bucketLabel = r.Label
+	}
+	rec := IngestRecord{
+		Agency:      pos.Agency,
+		BucketID:    bucketID,
+		BucketLabel: bucketLabel,
+		VehicleID:   pos.VehicleID,
+		Lat:         pos.Lat,
+		Lng:         pos.Lng,
+		At:          pos.Timestamp,
+	}
+	p.ingestBuf = append([]IngestRecord{rec}, p.ingestBuf...)
+	if len(p.ingestBuf) > ingestCap {
+		p.ingestBuf = p.ingestBuf[:ingestCap]
+	}
+}
+
+// SetLastPolledAgencies records which agencies were polled in the latest cycle.
+func (p *Pipeline) SetLastPolledAgencies(agencies []string) {
+	p.mu.Lock()
+	p.lastPolled = append([]string(nil), agencies...)
+	p.mu.Unlock()
+}
+
+// LastPolledAgencies returns agencies from the most recent poll cycle.
+func (p *Pipeline) LastPolledAgencies() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]string, len(p.lastPolled))
+	copy(out, p.lastPolled)
+	return out
+}
+
+// RecentIngestGrouped returns the ingest ring buffer grouped by bucket label (newest first per group).
+func (p *Pipeline) RecentIngestGrouped() map[string][]IngestRecord {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	groups := make(map[string][]IngestRecord)
+	for _, rec := range p.ingestBuf {
+		groups[rec.BucketLabel] = append(groups[rec.BucketLabel], rec)
+	}
+	return groups
+}
+
+// RecentIngestForRegion returns recent ingest records for one region bucket (newest first).
+func (p *Pipeline) RecentIngestForRegion(regionID string) []IngestRecord {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]IngestRecord, 0, ingestCap)
+	for _, rec := range p.ingestBuf {
+		if rec.BucketID == regionID {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// LatestPositionsFor returns latest positions filtered to the given agencies.
+func (p *Pipeline) LatestPositionsFor(agencies map[string]struct{}) []gtfs.VehiclePosition {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]gtfs.VehiclePosition, 0)
+	for _, pos := range p.vehicleSeen {
+		if _, ok := agencies[pos.Agency]; ok {
+			out = append(out, pos)
+		}
+	}
+	return out
+}
+
+// StatsFor returns vehicle count for filtered agencies, last poll, and total events.
+func (p *Pipeline) StatsFor(agencies map[string]struct{}) (vehicleCount int, lastPoll time.Time, eventCount int64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, pos := range p.vehicleSeen {
+		if _, ok := agencies[pos.Agency]; ok {
+			vehicleCount++
+		}
+	}
+	return vehicleCount, p.lastPoll, p.eventCount
 }
 
 // ScanLatest returns the latest position per vehicle across all agencies.
