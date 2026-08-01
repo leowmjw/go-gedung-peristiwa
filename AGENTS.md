@@ -45,8 +45,8 @@ routing, testing/synctest
 - Use mise to run tasks, set env variables, automate
 - **All env vars load from `.env`** via `mise.toml` → `[env] _.file = ".env"` (copy from `.env.example`)
 - Tools available: ripgrep, fzf, air, goreleaser, watchexec
-- Use overmind to start MinIO + simulate (`mise run dev`)
-- Use `mise run demo` for KL transit map (`Procfile.demo`, port `DEMO_HTTP_ADDR=:8081`)
+- Use overmind to start MinIO + simulate (`mise run dev` — FinTech MVP UI + MinIO)
+- Use `mise run demo` for transit map (`Procfile.demo`, port `DEMO_HTTP_ADDR=:8081`)
 - IsleDB tail debugging: `mise run dev:isledb-debug` (see **IsleDB Learnings** below)
 
 ## Specification (MVP)
@@ -77,22 +77,39 @@ routing, testing/synctest
 - [x] Write unit tests with blobstore.NewMemory()
 - [x] Write integration tests (full pipeline)
 - [x] E2E test tag + mise tasks (`test-e2e`, `simulate-tigris`)
-- [ ] Procfile + overmind E2E (manual: `mise run dev` with MinIO running)
+- [x] Procfile + overmind — `mise run dev` → `overmind start` (`Procfile`: MinIO + `scripts/dev.sh` → `minio-setup` + air on `DEV_HTTP_ADDR`, default `:8080`). PRD standalone MinIO path.
 
-### Phase 3: KL Transit Demo (DONE)
-- [x] `cmd/demo` — GTFS poller (KL feeds), IsleDB on MinIO, Leaflet map UI
-- [x] `internal/gtfs/` — 15 feeds defined; demo uses `gtfs.KLFeeds()` (RapidKL + MRT Feeder)
-- [x] `internal/demo/` — per-agency IsleDB writers; in-memory `LatestPositions()` for live UI
-- [x] `internal/web/demo/` — plain JSON SSE (`event: vehicles`, `event: stats`); no Datastar CDN
-- [x] `Procfile.demo` + `mise run demo` (separate from dev `Procfile`)
-- [x] Authoritative region switcher — center+zoom buckets (default Klang Valley, National for KTMB); SSE filtered by active region; debug ingest overlay
+### Phase 3: Malaysia Transit Demo (DONE)
+- [x] `cmd/demo` — GTFS poller, IsleDB on MinIO, Leaflet map (`mise run demo`, `Procfile.demo`, `:8081`)
+- [x] `internal/gtfs/` — all **15** feeds; **8 region buckets** in `regions.go`: Klang Valley (default), National (KTMB), Penang, **East Coast** (Kuantan + Kelantan + Terengganu), Johor, Sarawak, **Northern** (Perlis, Kedah, Perak), Central (N. Sembilan, Melaka)
+- [x] `internal/demo/` — per-agency IsleDB writers; in-memory projection + `NotifyPoll` batch SSE (not per-key tail)
+- [x] `internal/web/demo/` — SSE (`vehicles`, `stats`, `ingest`); session cookie `demo_sid`; region persisted in `data/demo-sessions.json`
+- [x] `PollCoordinator` — poll union of session regions; per-region freshness (no duplicate GTFS for same region / many viewers)
+- [x] Authoritative region switcher; debug ingest filtered per session region
+- [ ] Per-agency toggles within active region (optional UX)
+- [ ] Datastar v2 migration (still plain JS + EventSource)
 
 ### Deferred (post-MVP)
 - Temporal workflows
-- Full Malaysia map (all 15 feeds; demo is KL-only for now)
+- Poll all 15 feeds every cycle regardless of viewers (analytics mode; today polls union of session regions only)
 - github.com/tigrisdata/storage-go (Tigris-specific APIs beyond S3)
 
-See **Future Ideas / Roadmap** below for demo UI, viewport filtering, and historical replay.
+### Next agent: Historical replay (priority demo feature)
+
+**Goal:** Playback stored vehicle positions from IsleDB — scrubber + speed (1×, 10×, 60×). **Not** live SSE tail.
+
+**Do not** attach live map SSE to `TailingReader.Tail` (see IsleDB Learnings — per-key fan-out broke the UI).
+
+**Suggested approach:**
+1. New route/page or mode, e.g. `GET /replay` + `GET /api/replay/stream` (or WebSocket), separate from `/api/vehicles/stream`.
+2. One background reader per replay session: `ScanLatest` / `CatchUp` on agency prefixes, or time-filtered scan; dedupe by `agency:vehicle_id`; batch patches to client (same `vehicles` JSON shape as live).
+3. Reuse `internal/demo/pipeline.go` — `TailUpdates` / agency `scan` are starting points; `cmd/isledb-debug` for tail visibility experiments.
+4. Keys are `{agency}:{vehicle_id}:{timestamp_ns}` — replay must pick latest per vehicle per playback time or walk timeline.
+5. Tests: memory backend, no GTFS; unit test replay dedupe + ordering.
+
+**Live UI contract (keep):** `Write` → `FlushAll` → `NotifyPoll` → in-memory `LatestPositionsFor` → SSE. Replay is a separate read path.
+
+See **Future Ideas / Roadmap** below for remaining demo polish.
 
 ## Future Ideas / Roadmap
 
@@ -107,49 +124,20 @@ See **Future Ideas / Roadmap** below for demo UI, viewport filtering, and histor
 
 ### Live map — viewport & tenant filtering
 
-**Decision: center + region buckets** (not bbox). Server maps active region → center/zoom
-+ tenant set; coarse over-fetch within the bucket is fine.
+**Done:** center + region buckets, authoritative switcher, session-scoped region + SSE filter.
 
-**Default:** Klang Valley selected on load, with all tenants under that bucket checked
-(current demo: RapidKL Bus + MRT Feeder). Other regions deselected.
+**Still optional:**
+- Sub-checkboxes per feed/agency within the active region.
+- Datastar v2 instead of hand-written SSE/Leaflet JS.
+- Multi-region view (“add region” mode) — explicitly not in v1.
 
-**Region switcher UX (authoritative):**
-- Top-level region control (tabs or list): **Klang Valley** (default), **National**, Johor,
-  Sarawak, Penang, … — same level; user picks exactly one active region.
-- On switch: **fly map** to region center/zoom → **deselect previous** tenants → **auto-select
-  all tenants** in the new bucket. One mental model: “I’m looking at this region.”
-- Manual map pan/zoom does **not** auto-change region (explicit switch only — keeps client
-  and SSE state simple for Datastar v2).
-- Optional sub-checkboxes per feed/agency within the active region for power users later.
+**National bucket:** KTMB under top-level **National** (not Klang Valley).
 
-**National bucket:** cross-region tenants (e.g. **KTMB** rail) live under a top-level
-**National** region — not folded into Klang Valley or duplicated per state. Selecting
-National flies to a peninsula-wide (or country) view and streams only national-scope
-agencies. FinTech multi-tenant analog: tenants that span regions get their own National
-bucket rather than being attached to a local region.
-
-**Why this over bbox:** matches how users think (state/valley/national), trivial server
-filter (`region_id` → agency list), no per-frame bounds sync.
-**Trade-off:** no multi-region view until we add an explicit “add region” mode.
-
-- **Client stays simple** — target [Datastar v2](https://data-star.dev/) patches over a
-  mostly server-rendered map; region + tenant selection driven from server or simple
-  `data-on-click` handlers; avoid SPA-style per-marker subscriptions.
-- **Full tenant selection** — all GTFS feeds / FinTech tenants available via region buckets,
-  not KL-only demo feeds.
-
-### Historical replay (separate feature — not live UI)
-- Use IsleDB `CatchUp` / `Tail` (or `ScanLatest` + time-range filter) to **replay stored
-  positions** for “watch how it flowed” playback — e.g. scrubber + speed multiplier
-  (1×, 10×, 60×).
-- **Do not** wire live SSE to per-key tail; replay is a dedicated mode (separate handler
-  or page), one background reader, dedupe by `agency:vehicle_id`, batch patches to the map.
-- `internal/demo/pipeline.go` `TailUpdates` remains test/harness code until this feature
-  is built.
+### Historical replay
+- Moved to **Next agent: Historical replay** above (implementation brief).
 
 ### Other (from deferred)
 - Temporal workflows for long-running ingest / replay jobs
-- Full Malaysia map (all 15 GTFS feeds)
 - Tigris-specific APIs beyond S3
 
 ## IsleDB Learnings (v0.4.2)

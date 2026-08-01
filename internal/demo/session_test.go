@@ -1,6 +1,7 @@
 package demo_test
 
 import (
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -74,6 +75,26 @@ func TestSessionStoreFeedsToPollUnion(t *testing.T) {
 	}
 	if len(feeds) != 3 {
 		t.Fatalf("feeds = %d, want 3 (johor + klang valley)", len(feeds))
+	}
+}
+
+func TestSessionStorePersistRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	s1, err := demo.OpenSessionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1.Touch("browser-a")
+	if err := s1.SetRegion("browser-a", "johor"); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := demo.OpenSessionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.Region("browser-a") != "johor" {
+		t.Fatalf("after reload region = %q", s2.Region("browser-a"))
 	}
 }
 

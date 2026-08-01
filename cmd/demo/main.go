@@ -51,7 +51,11 @@ func run() int {
 	}
 	defer pipe.Close(context.Background())
 
-	sessions := demo.NewSessionStore()
+	sessions, err := demo.OpenSessionStore(demo.DefaultSessionStorePath)
+	if err != nil {
+		slog.Error("session store", "err", err)
+		return 1
+	}
 	coordinator := demo.NewPollCoordinator(sessions, *pollInterval)
 	poller := gtfs.DefaultPoller()
 
