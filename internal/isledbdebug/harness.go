@@ -67,14 +67,14 @@ func Open(ctx context.Context, backend pipeline.Backend, prefixSuffix string) (*
 }
 
 func (h *Harness) key(seq int) []byte {
-	return []byte(fmt.Sprintf("%s%04d", keyPrefix, seq))
+	return fmt.Appendf(nil, "%s%04d", keyPrefix, seq)
 }
 
 // WriteBatch writes sequential keys with distinct values.
 func (h *Harness) WriteBatch(n int, startSeq int) error {
 	for i := range n {
 		seq := startSeq + i
-		val := []byte(fmt.Sprintf("v-%d-%d", time.Now().UnixNano(), seq))
+		val := fmt.Appendf(nil, "v-%d-%d", time.Now().UnixNano(), seq)
 		if err := h.writer.Put(h.key(seq), val); err != nil {
 			return err
 		}
@@ -170,9 +170,9 @@ func (h *Harness) Close(ctx context.Context) error {
 
 // VisibilityRow is one flush-delay measurement.
 type VisibilityRow struct {
-	DelayMs   int
-	KeysSeen  int
-	Err       string
+	DelayMs  int
+	KeysSeen int
+	Err      string
 }
 
 // RunVisibility writes two batches separated by flush; measures when batch-2 appears via CatchUp.
@@ -234,15 +234,20 @@ func RunIncremental(ctx context.Context, h *Harness, priorKeys, newKeys int, wai
 	counts, errs := h.TailWatch(tailCtx, checkpoint)
 	var total atomic.Int32
 	firstNew := make(chan time.Time, 1)
+	allReceived := make(chan struct{})
 	gotFirst := atomic.Bool{}
+	gotAll := atomic.Bool{}
 
 	drain := make(chan struct{})
 	go func() {
 		defer close(drain)
 		for range counts {
-			total.Add(1)
+			n := total.Add(1)
 			if gotFirst.CompareAndSwap(false, true) {
 				firstNew <- time.Now()
+			}
+			if n >= int32(newKeys) && gotAll.CompareAndSwap(false, true) {
+				close(allReceived)
 			}
 		}
 	}()
@@ -275,23 +280,33 @@ func RunIncremental(ctx context.Context, h *Harness, priorKeys, newKeys int, wai
 		}
 	}
 
-	deadline := time.After(wait - time.Since(start))
-	for total.Load() < int32(newKeys) {
-		select {
-		case <-counts:
-		case <-deadline:
-			cancel()
-			<-drain
-			return IncrementalResult{
-				WroteKeys:     newKeys,
-				TailEvents:    int(total.Load()),
-				FirstNewKeyMs: firstMs,
-				Timeout:       true,
-			}, nil
-		case err := <-errs:
-			if err != nil {
-				return IncrementalResult{}, err
-			}
+	remaining := wait - time.Since(start)
+	if remaining <= 0 {
+		cancel()
+		<-drain
+		return IncrementalResult{
+			WroteKeys:     newKeys,
+			TailEvents:    int(total.Load()),
+			FirstNewKeyMs: firstMs,
+			Timeout:       true,
+		}, nil
+	}
+	deadline := time.NewTimer(remaining)
+	defer deadline.Stop()
+	select {
+	case <-allReceived:
+	case <-deadline.C:
+		cancel()
+		<-drain
+		return IncrementalResult{
+			WroteKeys:     newKeys,
+			TailEvents:    int(total.Load()),
+			FirstNewKeyMs: firstMs,
+			Timeout:       true,
+		}, nil
+	case err := <-errs:
+		if err != nil {
+			return IncrementalResult{}, err
 		}
 	}
 	cancel()

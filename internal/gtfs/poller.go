@@ -73,7 +73,7 @@ func (p *Poller) pollFeed(ctx context.Context, feed Feed) PollResult {
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := range 4 {
 		if err := ctx.Err(); err != nil {
 			return PollResult{Feed: feed, Err: err}
 		}

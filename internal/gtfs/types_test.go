@@ -74,9 +74,9 @@ func TestPollAllPartialFailure(t *testing.T) {
 	goodFeed := Feed{Agency: "ktmb", URL: "http://example/good"}
 	badFeed := Feed{Agency: "mybas-ipoh", URL: "http://example/bad"}
 	body := mustMarshalFeed(t, testFeedMessage([]*gtfsrt.FeedEntity{{
-		Id: proto.String("e1"),
+		Id: new("e1"),
 		Vehicle: &gtfsrt.VehiclePosition{
-			Vehicle:  &gtfsrt.VehicleDescriptor{Id: proto.String("bus-1")},
+			Vehicle:  &gtfsrt.VehicleDescriptor{Id: new("bus-1")},
 			Position: &gtfsrt.Position{Latitude: proto.Float32(4.0), Longitude: proto.Float32(101.0)},
 		},
 	}}))

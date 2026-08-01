@@ -3,6 +3,7 @@ package demo
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -84,9 +85,7 @@ func (s *SessionStore) persist() error {
 		return err
 	}
 	file := sessionFile{Sessions: make(map[string]string, len(s.regions))}
-	for sid, regionID := range s.regions {
-		file.Sessions[sid] = regionID
-	}
+	maps.Copy(file.Sessions, s.regions)
 	b, err := json.Marshal(file)
 	if err != nil {
 		return err
@@ -138,9 +137,7 @@ func (s *SessionStore) persistLocked() error {
 		return nil
 	}
 	file := sessionFile{Sessions: make(map[string]string, len(s.regions))}
-	for sid, regionID := range s.regions {
-		file.Sessions[sid] = regionID
-	}
+	maps.Copy(file.Sessions, s.regions)
 	b, err := json.Marshal(file)
 	if err != nil {
 		return err

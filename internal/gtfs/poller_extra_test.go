@@ -24,7 +24,7 @@ func TestBackoffDuration(t *testing.T) {
 func TestParseFeedUsesEntityID(t *testing.T) {
 	feed := Feed{Agency: "ktmb"}
 	body := mustMarshalFeed(t, testFeedMessage([]*gtfsrt.FeedEntity{{
-		Id: proto.String("entity-99"),
+		Id: new("entity-99"),
 		Vehicle: &gtfsrt.VehiclePosition{
 			Position: &gtfsrt.Position{Latitude: proto.Float32(3.5), Longitude: proto.Float32(101.0)},
 		},
@@ -41,9 +41,9 @@ func TestParseFeedUsesEntityID(t *testing.T) {
 func TestPollRateLimitRetry(t *testing.T) {
 	feed := Feed{Agency: "ktmb", URL: "http://example/ratelimit"}
 	body := mustMarshalFeed(t, testFeedMessage([]*gtfsrt.FeedEntity{{
-		Id: proto.String("e1"),
+		Id: new("e1"),
 		Vehicle: &gtfsrt.VehiclePosition{
-			Vehicle:  &gtfsrt.VehicleDescriptor{Id: proto.String("bus-1")},
+			Vehicle:  &gtfsrt.VehicleDescriptor{Id: new("bus-1")},
 			Position: &gtfsrt.Position{Latitude: proto.Float32(4.0), Longitude: proto.Float32(101.0)},
 		},
 	}}))
