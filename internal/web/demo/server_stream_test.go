@@ -27,7 +27,7 @@ func TestStreamRefreshOnPoll(t *testing.T) {
 		polled: []string{"prasarana-rapid-bus-kl"},
 	}
 
-	srv := demoweb.NewServer(src, demopkg.NewSessionStore(), nil)
+	srv := demoweb.NewServer(src, nil, demopkg.NewSessionStore(), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -102,7 +102,7 @@ func TestStreamFiltersByRegion(t *testing.T) {
 	}
 	ch := make(chan struct{})
 	close(ch)
-	srv := demoweb.NewServer(&stubSource{positions: positions, polls: ch}, demopkg.NewSessionStore(), nil)
+	srv := demoweb.NewServer(&stubSource{positions: positions, polls: ch}, nil, demopkg.NewSessionStore(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/vehicles/stream?region=klang-valley", nil)
 	rec := httptest.NewRecorder()
 

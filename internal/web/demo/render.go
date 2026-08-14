@@ -44,6 +44,7 @@ const indexHTML = `<!DOCTYPE html>
   <div class="layout">
     <aside id="sidebar">
       <h1>Gedung Peristiwa</h1>
+      <p class="sub"><a href="/replay" style="color:#58a6ff;font-size:0.8rem">Historical replay →</a></p>
       <p class="sub" id="region-subtitle">{{.ActiveRegion.Label}}</p>
       <h2>Region</h2>
       <div id="region-list">

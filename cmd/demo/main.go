@@ -62,7 +62,7 @@ func run() int {
 	pollNow := make(chan string, 1)
 	go pollLoop(ctx, *pollInterval, poller, coordinator, pipe, pollNow)
 
-	srv := demoweb.NewServer(pipe, sessions, func(regionID string) {
+	srv := demoweb.NewServer(pipe, pipe, sessions, func(regionID string) {
 		select {
 		case pollNow <- regionID:
 		default:

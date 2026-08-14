@@ -325,6 +325,12 @@ func (p *Pipeline) ScanLatest(ctx context.Context) ([]gtfs.VehiclePosition, erro
 }
 
 func (aw *agencyWriter) scan(ctx context.Context) ([]gtfs.VehiclePosition, error) {
+	return aw.scanThrough(ctx, 0)
+}
+
+// scanThrough returns latest position per vehicle for keys with timestamp_ns <= maxTimestampNS.
+// maxTimestampNS <= 0 means no upper bound.
+func (aw *agencyWriter) scanThrough(ctx context.Context, maxTimestampNS int64) ([]gtfs.VehiclePosition, error) {
 	reader, err := isledb.OpenReader(ctx, aw.store, isledb.ReaderOpenOptions{
 		CacheDir: aw.cacheDir,
 	})
@@ -346,6 +352,11 @@ func (aw *agencyWriter) scan(ctx context.Context) ([]gtfs.VehiclePosition, error
 
 	latest := make(map[string]gtfs.VehiclePosition)
 	for _, kv := range rows {
+		if maxTimestampNS > 0 {
+			if ts := gtfs.TimestampNSFromKey(string(kv.Key)); ts > maxTimestampNS {
+				continue
+			}
+		}
 		pos, err := gtfs.ParseVehiclePosition(kv.Value)
 		if err != nil {
 			continue

@@ -96,6 +96,8 @@ routing, testing/synctest
 
 ### Next agent: Historical replay (priority demo feature)
 
+**Status:** Implemented — `GET /replay`, `GET /api/replay/catalog`, `GET /api/replay/stream` (batch `event: vehicles`, separate from live SSE). Catalog lists `manifest/snapshots/*.manifest` or falls back to `manifest/log` flush events when snapshot files are absent.
+
 **Goal:** Playback stored vehicle positions from IsleDB — scrubber + speed (1×, 10×, 60×). **Not** live SSE tail.
 
 **Do not** attach live map SSE to `TailingReader.Tail` (see IsleDB Learnings — per-key fan-out broke the UI).

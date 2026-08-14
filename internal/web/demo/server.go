@@ -30,14 +30,16 @@ type RegionChangeFunc func(regionID string)
 // Server serves the transit map demo UI.
 type Server struct {
 	pipeline       PipelineSource
+	replay         ReplaySource
 	sessions       *demopkg.SessionStore
 	onRegionChange RegionChangeFunc
 }
 
-// NewServer creates a demo HTTP server.
-func NewServer(pipeline PipelineSource, sessions *demopkg.SessionStore, onRegionChange RegionChangeFunc) *Server {
+// NewServer creates a demo HTTP server. replay may be nil to disable replay routes.
+func NewServer(pipeline PipelineSource, replay ReplaySource, sessions *demopkg.SessionStore, onRegionChange RegionChangeFunc) *Server {
 	return &Server{
 		pipeline:       pipeline,
+		replay:         replay,
 		sessions:       sessions,
 		onRegionChange: onRegionChange,
 	}
@@ -51,6 +53,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/region", s.handleRegion)
 	mux.HandleFunc("/api/vehicles", s.handleVehicles)
 	mux.HandleFunc("/api/vehicles/stream", s.handleVehicleStream)
+	mux.HandleFunc("/replay", s.handleReplayIndex)
+	mux.HandleFunc("/api/replay/catalog", s.handleReplayCatalog)
+	mux.HandleFunc("/api/replay/stream", s.handleReplayStream)
 	return s.withSession(mux)
 }
 

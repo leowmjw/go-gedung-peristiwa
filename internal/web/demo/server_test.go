@@ -70,7 +70,7 @@ func (s *stubSource) LastPolledAgencies() []string {
 }
 
 func newTestServer(stub *stubSource) *demoweb.Server {
-	return demoweb.NewServer(stub, demopkg.NewSessionStore(), nil)
+	return demoweb.NewServer(stub, nil, demopkg.NewSessionStore(), nil)
 }
 
 func sessionCookie(rec *httptest.ResponseRecorder) *http.Cookie {
