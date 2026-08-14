@@ -198,3 +198,11 @@ echo "✅ Bucket '${MINIO_BUCKET}' is ready"
 [tasks.lint]
 description = "Run go vet"
 run = "go vet ./..."
+
+[tasks."sites:generate"]
+description = "Generate the static Go + Datastar Codex Sites sanity page"
+run = "go run ./cmd/sites-smoke --out tmp/sites-smoke/public"
+
+[tasks."sites:test"]
+description = "Test deterministic static Sites generation"
+run = "go test ./internal/web/sitessmoke ./cmd/sites-smoke"
