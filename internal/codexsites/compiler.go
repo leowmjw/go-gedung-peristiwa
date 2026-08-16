@@ -1,5 +1,10 @@
-// Package codexsites compiles the current Go demo configuration into an
-// isolated Cloudflare Worker bundle for Codex Sites.
+// Package codexsites emits a Cloudflare Worker bundle for Codex Sites.
+//
+// Generate is a catalog emitter only: it JSON-encodes gtfs.AllRegions() and
+// AllFeeds() into config.js / worker SITE_DATA, then copies static templates
+// (HTML, CSS, JS, worker logic) from templates.go. Poller policy, D1/R2
+// behaviour, and UI transport are hand-ported in templates.go — not compiled
+// from internal/demo or internal/gtfs/poller.go. See AGENTS.md.
 package codexsites
 
 import (
@@ -32,7 +37,8 @@ type siteFeed struct {
 	URL    string `json:"url"`
 }
 
-// Generate writes a complete, disposable Codex Sites bundle to out.
+// Generate writes a disposable Codex Sites bundle to out: catalog JSON plus
+// copied template files. Worker behaviour lives in templates.go.
 func Generate(out string) error {
 	regions := gtfs.AllRegions()
 	feeds := gtfs.AllFeeds()

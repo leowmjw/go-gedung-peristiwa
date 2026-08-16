@@ -41,6 +41,7 @@ func TestGenerateCompilesCurrentTransitConfig(t *testing.T) {
 		"regionAgencies", "SELECT DISTINCT r2_key", "statements.slice(i,i+90)",
 		"region_poll_state", "poll_seconds", "skipped:true", "knownRegion",
 		"poll interval must be 10, 20, or 30 seconds",
+		"pollFeedsSequential", "claimRegionPoll", "fetchFeed", "HTTP 429", "gtfsFeedsFor",
 	} {
 		if !strings.Contains(workerSrc, want) {
 			t.Errorf("worker.ts missing %q", want)
@@ -57,6 +58,15 @@ func TestGenerateCompilesCurrentTransitConfig(t *testing.T) {
 	}
 	if strings.Contains(workerSrc, "SELECT id,r2_key,at_ms FROM snapshots") {
 		t.Error("worker.ts replay must DISTINCT r2_key so one R2 object is one frame")
+	}
+	if strings.Contains(workerSrc, "Promise.all(feeds.map") {
+		t.Error("worker.ts must fetch GTFS feeds sequentially, not Promise.all over feed.url")
+	}
+	if strings.Contains(workerSrc, "/api/vehicles/stream") {
+		t.Error("worker.ts must not expose live SSE; use short GET /api/vehicles + /api/status")
+	}
+	if strings.Contains(workerSrc, "liveStream") {
+		t.Error("worker.ts must not include liveStream handler")
 	}
 
 	app, err := os.ReadFile(filepath.Join(out, "public/app.js"))
