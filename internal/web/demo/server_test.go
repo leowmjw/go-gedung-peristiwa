@@ -195,6 +195,18 @@ func TestIndexPage(t *testing.T) {
 	if strings.Contains(body, `data-poll="5"`) {
 		t.Fatal("5s poll option should be removed")
 	}
+	if strings.Contains(body, `"\"klang-valley\""`) {
+		t.Fatal("mustJSON double-escaped activeRegion")
+	}
+	if !strings.Contains(body, `const activeRegion = "klang-valley";`) {
+		t.Fatal("activeRegion should be a JSON string, not a quoted-and-escaped string")
+	}
+	if !strings.Contains(body, `let pollSeconds = 10;`) {
+		t.Fatal("pollSeconds should be a JSON number")
+	}
+	if strings.Contains(body, `new Set("[`) {
+		t.Fatal("currentAgencies should be a JSON array, not a quoted string")
+	}
 }
 
 func TestVehicleStreamHeaders(t *testing.T) {

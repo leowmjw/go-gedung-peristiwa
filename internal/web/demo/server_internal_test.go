@@ -17,3 +17,14 @@ func TestAgencyGroup(t *testing.T) {
 		}
 	}
 }
+
+func TestMustJSON(t *testing.T) {
+	got := string(mustJSON("klang-valley"))
+	if got != `"klang-valley"` {
+		t.Fatalf("mustJSON string = %q, want quoted JSON without extra escapes", got)
+	}
+	got = string(mustJSON(10))
+	if got != "10" {
+		t.Fatalf("mustJSON int = %q, want 10", got)
+	}
+}

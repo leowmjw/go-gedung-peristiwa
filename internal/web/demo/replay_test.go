@@ -27,6 +27,58 @@ func (r *replayStub) RunReplay(ctx context.Context, opts demopkg.ReplayOptions, 
 	return r.pipeline.RunReplay(ctx, opts, onFrame)
 }
 
+func TestReplayPageJSONNotDoubleEscaped(t *testing.T) {
+	ctx := context.Background()
+	cfg := pipeline.StoreConfig{Backend: pipeline.BackendMemory, CacheRoot: t.TempDir()}
+	p, err := demopkg.NewPipeline(ctx, cfg, []gtfs.Feed{{Agency: "prasarana-rapid-bus-kl"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close(ctx)
+
+	srv := demoweb.NewServer(&stubSource{}, &replayStub{pipeline: p}, demopkg.NewSessionStore(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/replay", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"\"klang-valley\""`) {
+		t.Fatalf("mustJSON double-escaped activeRegion (first-load catalog uses quoted id):\n%s", lineContaining(body, "const activeRegion"))
+	}
+	if !strings.Contains(body, `const activeRegion = "klang-valley";`) {
+		t.Fatalf("want JS string klang-valley, got:\n%s", lineContaining(body, "const activeRegion"))
+	}
+	if !strings.Contains(body, `const activeLabel = "Klang Valley";`) {
+		t.Fatalf("want JS string Klang Valley, got:\n%s", lineContaining(body, "const activeLabel"))
+	}
+
+	// Quoted id is what the double-escaped first load sent; catalog must reject it.
+	quoted := httptest.NewRequest(http.MethodGet, `/api/replay/catalog?region=%22klang-valley%22`, nil)
+	quotedRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(quotedRec, quoted)
+	if quotedRec.Code != http.StatusBadRequest {
+		t.Fatalf("quoted region status=%d body=%s", quotedRec.Code, quotedRec.Body.String())
+	}
+
+	ok := httptest.NewRequest(http.MethodGet, "/api/replay/catalog?region=klang-valley", nil)
+	okRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(okRec, ok)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("plain region status=%d body=%s", okRec.Code, okRec.Body.String())
+	}
+}
+
+func lineContaining(body, needle string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, needle) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return "<missing>"
+}
+
 func TestReplayCatalogEmptyRegion(t *testing.T) {
 	ctx := context.Background()
 	cfg := pipeline.StoreConfig{Backend: pipeline.BackendMemory, CacheRoot: t.TempDir()}

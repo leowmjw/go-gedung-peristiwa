@@ -1,7 +1,6 @@
 package demo
 
 import (
-	"encoding/json"
 	"html/template"
 )
 
@@ -277,12 +276,6 @@ const replayHTML = `<!DOCTYPE html>
 
 var replayTmpl = template.Must(func() (*template.Template, error) {
 	return template.New("replay").Funcs(template.FuncMap{
-		"mustJSON": func(v any) string {
-			b, err := json.Marshal(v)
-			if err != nil {
-				return "null"
-			}
-			return string(b)
-		},
+		"mustJSON": mustJSON,
 	}).Parse(replayHTML)
 }())

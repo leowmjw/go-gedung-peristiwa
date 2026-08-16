@@ -422,12 +422,17 @@ type indexData struct {
 
 var indexTmpl = template.Must(func() (*template.Template, error) {
 	return template.New("index").Funcs(template.FuncMap{
-		"mustJSON": func(v any) string {
-			b, err := json.Marshal(v)
-			if err != nil {
-				return "null"
-			}
-			return string(b)
-		},
+		"mustJSON": mustJSON,
 	}).Parse(indexHTML)
 }())
+
+// mustJSON marshals v as JSON for a <script> context. Returning template.JS
+// prevents html/template from JS-escaping the already-quoted JSON (which
+// produced "\"klang-valley\"" and broke first-load replay catalog fetches).
+func mustJSON(v any) template.JS {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "null"
+	}
+	return template.JS(b)
+}
