@@ -15,13 +15,22 @@ const indexHTML = `<!DOCTYPE html>
     body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
     .layout { display: flex; height: 100vh; }
     aside { width: 280px; background: var(--panel); border-right: 1px solid var(--border); padding: 1rem; overflow-y: auto; flex-shrink: 0; }
-    aside h1 { font-size: 1rem; margin: 0 0 0.5rem; }
+    aside h1 { font-size: 1rem; margin: 0 0 0.35rem; }
     aside h2 { font-size: 0.85rem; color: var(--muted); margin: 1rem 0 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
     #map-wrap { flex: 1; min-height: 0; position: relative; }
     #map { width: 100%; height: 100%; }
     .stats p { margin: 0.35rem 0; font-size: 0.9rem; }
     .stats span { font-weight: 600; }
     .sub { color: var(--muted); font-size: 0.8rem; margin-bottom: 1rem; }
+    .brand-nav { margin: 0 0 0.7rem; }
+    .poll-row { display: flex; align-items: center; justify-content: space-between; gap: 0.55rem; margin: 0 0 0.9rem; }
+    .poll-label { font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); flex-shrink: 0; }
+    .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; background: rgba(13, 17, 23, 0.35); }
+    .seg-btn { appearance: none; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 0.72rem; font-variant-numeric: tabular-nums; padding: 0.22rem 0.62rem; cursor: pointer; line-height: 1.25; }
+    .seg-btn + .seg-btn { border-left: 1px solid var(--border); }
+    .seg-btn:hover { color: var(--text); }
+    .seg-btn.active { color: var(--accent); background: rgba(88, 166, 255, 0.12); font-weight: 600; }
+    .seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     .status { font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
     .status.ok { color: #3fb950; }
     .status.err { color: #f85149; }
@@ -44,7 +53,15 @@ const indexHTML = `<!DOCTYPE html>
   <div class="layout">
     <aside id="sidebar">
       <h1>Gedung Peristiwa</h1>
-      <p class="sub"><a href="/replay" style="color:#58a6ff;font-size:0.8rem">Historical replay →</a></p>
+      <p class="sub brand-nav"><a href="/replay" style="color:#58a6ff;font-size:0.8rem">Historical replay →</a></p>
+      <div class="poll-row" role="radiogroup" aria-label="How often to fetch live positions">
+        <span class="poll-label">Every</span>
+        <div class="seg" id="poll-interval">
+          {{range .PollOptions}}
+          <button type="button" class="seg-btn{{if eq . $.PollSeconds}} active{{end}}" role="radio" aria-checked="{{if eq . $.PollSeconds}}true{{else}}false{{end}}" data-poll="{{.}}" onclick="window.setPollInterval({{.}})">{{.}}s</button>
+          {{end}}
+        </div>
+      </div>
       <p class="sub" id="region-subtitle">{{.ActiveRegion.Label}}</p>
       <h2>Region</h2>
       <div id="region-list">
@@ -93,6 +110,7 @@ const indexHTML = `<!DOCTYPE html>
     let stream = null;
     let activeRegionId = activeRegion;
     let activeRegionLabel = activeLabel;
+    let pollSeconds = {{mustJSON .PollSeconds}};
 
     const statusEl = document.getElementById('stream-status');
     const overlayEl = document.getElementById('ingest-overlay');
@@ -221,6 +239,36 @@ const indexHTML = `<!DOCTYPE html>
       ).join('');
     }
 
+    function setActivePollButton(seconds) {
+      pollSeconds = seconds;
+      document.querySelectorAll('#poll-interval .seg-btn').forEach(btn => {
+        const on = Number(btn.getAttribute('data-poll')) === seconds;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
+    }
+
+    window.setPollInterval = async function(seconds) {
+      if (seconds === pollSeconds) return;
+      const prev = pollSeconds;
+      setActivePollButton(seconds);
+      try {
+        const res = await fetch('/api/poll-interval', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ seconds: seconds })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        setActivePollButton(data.seconds);
+      } catch (err) {
+        setActivePollButton(prev);
+        statusEl.textContent = 'Could not change refresh rate';
+        statusEl.className = 'status err';
+        console.error(err);
+      }
+    };
+
     window.switchRegion = async function(id) {
       if (id === activeRegionId) return;
       statusEl.textContent = 'Switching region…';
@@ -262,6 +310,7 @@ const indexHTML = `<!DOCTYPE html>
       document.getElementById('region-subtitle').textContent = region.label;
       setActiveRegionButton(region.id);
       if (data.feeds) updateTenantList(data.feeds);
+      if (data.pollSeconds) setActivePollButton(data.pollSeconds);
     }
 
     setTimeout(async () => {

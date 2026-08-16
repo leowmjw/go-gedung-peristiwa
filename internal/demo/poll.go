@@ -1,11 +1,35 @@
 package demo
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/leow/go-gedung-peristiwa/internal/gtfs"
 )
+
+const (
+	// DefaultPollSeconds is the live-map poll interval until a session picks another.
+	DefaultPollSeconds = 10
+	// DefaultPollInterval is DefaultPollSeconds as a duration.
+	DefaultPollInterval = DefaultPollSeconds * time.Second
+	// PollTickInterval is how often the scheduler checks whether any region is due.
+	// It matches the fastest UI option so a 10s selection can take effect promptly.
+	PollTickInterval = 10 * time.Second
+)
+
+// AllowedPollSeconds are the live-map GTFS poll interval choices.
+var AllowedPollSeconds = []int{10, 20, 30}
+
+// NormalizePollSeconds accepts 10, 20, or 30; anything else is an error.
+func NormalizePollSeconds(seconds int) (int, error) {
+	for _, n := range AllowedPollSeconds {
+		if n == seconds {
+			return n, nil
+		}
+	}
+	return 0, fmt.Errorf("poll interval must be 10, 20, or 30 seconds")
+}
 
 // PollCoordinator plans GTFS fetches so each region is downloaded at most once per
 // interval, even when many browser sessions share the same region.
@@ -18,6 +42,9 @@ type PollCoordinator struct {
 
 // NewPollCoordinator returns a coordinator bound to session state.
 func NewPollCoordinator(sessions *SessionStore, interval time.Duration) *PollCoordinator {
+	if interval <= 0 {
+		interval = DefaultPollInterval
+	}
 	return &PollCoordinator{
 		sessions: sessions,
 		interval: interval,
@@ -37,14 +64,19 @@ func (c *PollCoordinator) MarkPolled(regionIDs []string, at time.Time) {
 	}
 }
 
-// FeedsForScheduledPoll returns feeds for in-use regions that are due for refresh.
+// FeedsForScheduledPoll returns feeds for a single in-use region that is due.
+// At most one region is chosen per call so each scheduler tick hits data.gov.my
+// once (that region's feeds), even when several regions are stale.
 func (c *PollCoordinator) FeedsForScheduledPoll(now time.Time) ([]gtfs.Feed, []string, error) {
-	due := c.dueRegions(now, "")
-	if len(due) == 0 {
+	id := c.nextDueRegion(now)
+	if id == "" {
 		return nil, nil, nil
 	}
-	feeds, err := gtfs.FeedsForRegions(due)
-	return feeds, due, err
+	feeds, err := gtfs.FeedsForRegion(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return feeds, []string{id}, nil
 }
 
 // FeedsForRegionSwitch returns feeds for one region after a session switch.
@@ -63,32 +95,95 @@ func (c *PollCoordinator) FeedsForRegionSwitch(now time.Time, regionID string) (
 	return feeds, []string{regionID}, nil
 }
 
-func (c *PollCoordinator) dueRegions(now time.Time, only string) []string {
+const (
+	pollPriorityKlangValley = 0
+	pollPriorityPenang      = 1
+	pollPriorityOther       = 2
+)
+
+func regionPollPriority(regionID string) int {
+	switch regionID {
+	case gtfs.DefaultRegionID:
+		return pollPriorityKlangValley
+	case "penang":
+		return pollPriorityPenang
+	default:
+		return pollPriorityOther
+	}
+}
+
+func (c *PollCoordinator) intervalLocked(regionID string) time.Duration {
+	interval := c.sessions.MinPollIntervalForRegion(regionID)
+	if interval <= 0 {
+		return c.interval
+	}
+	return interval
+}
+
+// effectivePollPriorityLocked ranks due regions. Klang Valley, then Penang, then
+// others. A non-priority region that has waited at least twice its interval is
+// promoted so it cannot starve.
+func (c *PollCoordinator) effectivePollPriorityLocked(regionID string, now time.Time) int {
+	pri := regionPollPriority(regionID)
+	if pri < pollPriorityOther {
+		return pri
+	}
+	last, ok := c.lastPoll[regionID]
+	if ok && now.Sub(last) >= 2*c.intervalLocked(regionID) {
+		return pollPriorityKlangValley
+	}
+	return pri
+}
+
+// nextDueRegion picks at most one stale region per tick. Klang Valley and Penang
+// win when due (highest churn). Other due regions wait unless they are starving.
+func (c *PollCoordinator) nextDueRegion(now time.Time) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var candidates []string
-	if only != "" {
-		candidates = []string{only}
-	} else {
-		candidates = c.sessions.ActiveRegionIDs()
-		if len(candidates) == 0 {
-			candidates = []string{gtfs.DefaultRegionID}
-		}
+	candidates := c.sessions.LiveRegionIDs()
+	if len(candidates) == 0 {
+		return ""
 	}
 
-	var due []string
-	seen := make(map[string]struct{}, len(candidates))
+	best := ""
+	var bestLast time.Time
+	bestSeen := false
+	bestPri := 0
 	for _, id := range candidates {
-		if _, ok := seen[id]; ok {
+		if !c.isStaleLocked(id, now) {
 			continue
 		}
-		seen[id] = struct{}{}
-		if c.isStaleLocked(id, now) {
-			due = append(due, id)
+		last, ok := c.lastPoll[id]
+		pri := c.effectivePollPriorityLocked(id, now)
+		if best == "" {
+			best, bestLast, bestSeen, bestPri = id, last, ok, pri
+			continue
+		}
+		if preferDueRegion(id, last, ok, pri, best, bestLast, bestSeen, bestPri) {
+			best, bestLast, bestSeen, bestPri = id, last, ok, pri
 		}
 	}
-	return due
+	return best
+}
+
+func preferDueRegion(id string, last time.Time, seen bool, pri int, bestID string, bestLast time.Time, bestSeen bool, bestPri int) bool {
+	if pri != bestPri {
+		return pri < bestPri
+	}
+	if !seen && bestSeen {
+		return true
+	}
+	if seen && !bestSeen {
+		return false
+	}
+	if !seen && !bestSeen {
+		return id < bestID
+	}
+	if last.Equal(bestLast) {
+		return id < bestID
+	}
+	return last.Before(bestLast)
 }
 
 func (c *PollCoordinator) isStale(regionID string, now time.Time) bool {
@@ -99,16 +194,19 @@ func (c *PollCoordinator) isStale(regionID string, now time.Time) bool {
 
 func (c *PollCoordinator) isStaleLocked(regionID string, now time.Time) bool {
 	last, ok := c.lastPoll[regionID]
-	return !ok || now.Sub(last) >= c.interval
+	return !ok || now.Sub(last) >= c.intervalLocked(regionID)
 }
 
 // RegionViewerCounts returns how many sessions are viewing each region.
 func (s *SessionStore) RegionViewerCounts() map[string]int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pruneExpiredLocked(time.Now()) {
+		_ = s.persistLocked()
+	}
 	counts := make(map[string]int)
-	for _, id := range s.regions {
-		counts[id]++
+	for _, st := range s.sessions {
+		counts[st.Region]++
 	}
 	return counts
 }

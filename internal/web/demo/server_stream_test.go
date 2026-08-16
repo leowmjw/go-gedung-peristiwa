@@ -125,3 +125,38 @@ func TestStreamFiltersByRegion(t *testing.T) {
 		t.Fatalf("missing kl vehicle:\n%s", body)
 	}
 }
+
+func TestVehicleStreamLivePollListIgnoresClosedTabs(t *testing.T) {
+	sessions := demopkg.NewSessionStore()
+	sessions.Touch("ghost")
+	if err := sessions.SetRegion("ghost", "east-coast"); err != nil {
+		t.Fatal(err)
+	}
+
+	polls := make(chan struct{})
+	srv := demoweb.NewServer(&stubSource{polls: polls}, nil, sessions, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/vehicles/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.Handler().ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	live := sessions.LiveRegionIDs()
+	if len(live) != 1 || live[0] != "klang-valley" {
+		t.Fatalf("live = %v, want only klang-valley", live)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout")
+	}
+	if ids := sessions.LiveRegionIDs(); len(ids) != 0 {
+		t.Fatalf("live after disconnect = %v", ids)
+	}
+}

@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/regions", s.handleRegions)
 	mux.HandleFunc("/api/region", s.handleRegion)
+	mux.HandleFunc("/api/poll-interval", s.handlePollInterval)
 	mux.HandleFunc("/api/vehicles", s.handleVehicles)
 	mux.HandleFunc("/api/vehicles/stream", s.handleVehicleStream)
 	mux.HandleFunc("/replay", s.handleReplayIndex)
@@ -73,6 +74,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Regions:      gtfs.AllRegions(),
 		ActiveRegion: active,
 		Feeds:        feeds,
+		PollSeconds:  s.sessions.PollSeconds(sid),
+		PollOptions:  demopkg.AllowedPollSeconds,
 	}); err != nil {
 		slog.Error("render index", "err", err)
 	}
@@ -110,10 +113,7 @@ func (s *Server) getRegion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{
-		"region": region,
-		"feeds":  feedViews(feeds),
-	})
+	s.writeRegionPayload(w, r, region, feeds)
 }
 
 func (s *Server) postRegion(w http.ResponseWriter, r *http.Request) {
@@ -134,9 +134,53 @@ func (s *Server) postRegion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.writeRegionPayload(w, r, region, feeds)
+}
+
+func (s *Server) handlePollInterval(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.writePollInterval(w, r)
+	case http.MethodPost:
+		s.postPollInterval(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+type setPollIntervalRequest struct {
+	Seconds int `json:"seconds"`
+}
+
+func (s *Server) postPollInterval(w http.ResponseWriter, r *http.Request) {
+	var req setPollIntervalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	sid := sessionID(r)
+	if err := s.sessions.SetPollSeconds(sid, req.Seconds); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.onRegionChange != nil {
+		s.onRegionChange(s.sessions.Region(sid))
+	}
+	s.writePollInterval(w, r)
+}
+
+func (s *Server) writePollInterval(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
-		"region": region,
-		"feeds":  feedViews(feeds),
+		"seconds": s.sessions.PollSeconds(sessionID(r)),
+		"options": demopkg.AllowedPollSeconds,
+	})
+}
+
+func (s *Server) writeRegionPayload(w http.ResponseWriter, r *http.Request, region regionView, feeds []gtfs.Feed) {
+	writeJSON(w, map[string]any{
+		"region":      region,
+		"feeds":       feedViews(feeds),
+		"pollSeconds": s.sessions.PollSeconds(sessionID(r)),
 	})
 }
 
@@ -173,6 +217,8 @@ func (s *Server) handleVehicles(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleVehicleStream(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	sid := sessionID(r)
+	s.sessions.AcquireLive(sid)
+	defer s.sessions.ReleaseLive(sid)
 
 	initSSE(w)
 	agencies, err := s.sessions.ActiveAgencies(sid)
@@ -202,14 +248,20 @@ func (s *Server) handleVehicleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	heartbeat := time.NewTicker(demopkg.SessionHeartbeatInterval)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-heartbeat.C:
+			s.sessions.Touch(sid)
 		case _, ok := <-polls:
 			if !ok {
 				return
 			}
+			s.sessions.Touch(sid)
 			if err := pushSnapshot(); err != nil {
 				if !errors.Is(err, io.EOF) {
 					slog.Error("push snapshot", "err", err)
@@ -232,12 +284,12 @@ type vehicleView struct {
 }
 
 type regionView struct {
-	ID       string      `json:"id"`
-	Label    string      `json:"label"`
-	Center   [2]float64  `json:"center"`
-	Zoom     int         `json:"zoom"`
-	Agencies []string    `json:"agencies"`
-	Active   bool        `json:"active,omitempty"`
+	ID       string     `json:"id"`
+	Label    string     `json:"label"`
+	Center   [2]float64 `json:"center"`
+	Zoom     int        `json:"zoom"`
+	Agencies []string   `json:"agencies"`
+	Active   bool       `json:"active,omitempty"`
 }
 
 type feedView struct {
@@ -364,6 +416,8 @@ type indexData struct {
 	Regions      []gtfs.MapRegion
 	ActiveRegion gtfs.MapRegion
 	Feeds        []gtfs.Feed
+	PollSeconds  int
+	PollOptions  []int
 }
 
 var indexTmpl = template.Must(func() (*template.Template, error) {

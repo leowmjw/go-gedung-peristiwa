@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,5 +72,45 @@ func TestPollRateLimitRetry(t *testing.T) {
 	}
 	if len(positions) != 1 || calls < 2 {
 		t.Fatalf("positions=%d calls=%d", len(positions), calls)
+	}
+}
+
+func TestPollSequentialDoesNotOverlap(t *testing.T) {
+	body := mustMarshalFeed(t, testFeedMessage([]*gtfsrt.FeedEntity{{
+		Id: new("e1"),
+		Vehicle: &gtfsrt.VehiclePosition{
+			Vehicle:  &gtfsrt.VehicleDescriptor{Id: new("bus-1")},
+			Position: &gtfsrt.Position{Latitude: proto.Float32(4.0), Longitude: proto.Float32(101.0)},
+		},
+	}}))
+
+	var inflight atomic.Int32
+	var max atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := inflight.Add(1)
+		for {
+			cur := max.Load()
+			if n <= cur || max.CompareAndSwap(cur, n) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		inflight.Add(-1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	p := &Poller{Client: srv.Client()}
+	feeds := []Feed{
+		{Agency: "a", URL: srv.URL + "/a"},
+		{Agency: "b", URL: srv.URL + "/b"},
+	}
+	results := p.PollSequential(context.Background(), feeds)
+	if len(results) != 2 || results[0].Err != nil || results[1].Err != nil {
+		t.Fatalf("results=%+v", results)
+	}
+	if max.Load() != 1 {
+		t.Fatalf("overlapped in-flight requests: max=%d", max.Load())
 	}
 }
