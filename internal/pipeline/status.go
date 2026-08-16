@@ -3,9 +3,6 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"os"
-
-	"github.com/ankur-anand/isledb"
 
 	"github.com/leow/go-gedung-peristiwa/internal/model"
 )
@@ -65,48 +62,14 @@ func Probe(ctx context.Context, cfg StoreConfig) BackendStatus {
 }
 
 func probeTenantKeyCount(ctx context.Context, cfg StoreConfig, tenantID string) (int, error) {
-	if cfg.Backend == BackendMemory {
-		p, err := New(ctx, cfg, []string{tenantID})
-		if err != nil {
-			return 0, err
-		}
-		defer p.Close(ctx)
-		tp, err := p.tenant(tenantID)
-		if err != nil {
-			return 0, err
-		}
-		keys, err := tp.ScanKeys(ctx)
-		return len(keys), err
-	}
-
-	store, err := openStore(ctx, cfg, tenantID)
+	_, reader, closer, err := OpenReaderDB(ctx, cfg, tenantID)
 	if err != nil {
 		return 0, err
 	}
-	defer store.Close()
-
-	cache := cacheDir(cfg, tenantID)
-	if err := os.MkdirAll(cache, 0755); err != nil {
-		return 0, err
-	}
-
-	reader, err := isledb.OpenReader(ctx, store, isledb.ReaderOpenOptions{
-		CacheDir: cache,
-	})
-	if err != nil {
-		return 0, err
-	}
-	defer reader.Close()
-
-	if err := reader.Refresh(ctx); err != nil {
-		return 0, err
-	}
+	defer closer()
 
 	minKey := model.TenantPrefix(tenantID)
 	maxKey := model.TenantUpperBound(tenantID)
-	rows, err := reader.ScanLimit(ctx, minKey, maxKey, 0)
-	if err != nil {
-		return 0, err
-	}
-	return len(rows), nil
+	keys, err := ScanKeysIter(ctx, reader, minKey, maxKey)
+	return len(keys), err
 }

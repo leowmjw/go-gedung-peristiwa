@@ -10,7 +10,7 @@ import (
 	"github.com/leow/go-gedung-peristiwa/internal/pipeline"
 )
 
-func TestPipelineMultipleTailUpdates(t *testing.T) {
+func TestPipelineMultipleChangeFeedWrites(t *testing.T) {
 	ctx := context.Background()
 	cfg := pipeline.StoreConfig{Backend: pipeline.BackendMemory, CacheRoot: t.TempDir()}
 	p, err := demo.NewPipeline(ctx, cfg, testFeeds())
@@ -19,10 +19,6 @@ func TestPipelineMultipleTailUpdates(t *testing.T) {
 	}
 	defer p.Close(ctx)
 
-	tailCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	updates := p.TailUpdates(tailCtx)
-
 	ts := time.Unix(1700000000, 0).UTC()
 	for i := range 3 {
 		pos := gtfs.VehiclePosition{
@@ -30,7 +26,7 @@ func TestPipelineMultipleTailUpdates(t *testing.T) {
 			Lat: 3.0 + float64(i)*0.1, Lng: 101.6,
 			Timestamp: ts.Add(time.Duration(i) * time.Minute),
 		}
-		if _, err := p.Write([]gtfs.VehiclePosition{pos}); err != nil {
+		if _, err := p.Write(ctx, []gtfs.VehiclePosition{pos}); err != nil {
 			t.Fatal(err)
 		}
 		if err := p.FlushAll(ctx); err != nil {
@@ -38,18 +34,12 @@ func TestPipelineMultipleTailUpdates(t *testing.T) {
 		}
 	}
 
-	deadline := time.After(8 * time.Second)
-	received := 0
-	for received < 1 {
-		select {
-		case _, ok := <-updates:
-			if !ok {
-				t.Fatal("channel closed")
-			}
-			received++
-		case <-deadline:
-			t.Fatalf("received %d tail updates", received)
-		}
+	cat, err := p.CatalogForRegion(ctx, "national")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.Total < 3 {
+		t.Fatalf("expected >=3 feed changes, got %d", cat.Total)
 	}
 
 	latest, err := p.ScanLatest(ctx)

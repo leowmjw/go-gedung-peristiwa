@@ -140,7 +140,7 @@ const replayHTML = `<!DOCTYPE html>
       notesEl.innerHTML = '';
       if (data.empty) {
         emptyEl.style.display = 'block';
-        emptyEl.textContent = data.message || 'No snapshot data for this region.';
+        emptyEl.textContent = data.message || 'No change-feed history for this region.';
       } else {
         emptyEl.style.display = 'none';
       }
@@ -161,11 +161,12 @@ const replayHTML = `<!DOCTYPE html>
           p.textContent = 'No data yet';
           block.appendChild(p);
         } else {
-          (ag.snapshots || []).slice(0, 8).forEach(s => {
+          (ag.entries || []).slice(0, 8).forEach(e => {
             const row = document.createElement('div');
             row.className = 'snap-row';
-            const at = s.at ? new Date(s.at).toISOString() : '—';
-            row.textContent = at + ' · ' + s.source + ' · ' + s.s3Key;
+            const from = e.from ? new Date(e.from).toISOString() : '—';
+            const to = e.to ? new Date(e.to).toISOString() : '—';
+            row.textContent = from + ' → ' + to + ' · ' + e.changeCount + ' changes';
             block.appendChild(row);
           });
         }
@@ -183,8 +184,8 @@ const replayHTML = `<!DOCTYPE html>
         const data = await res.json();
         renderCatalog(data);
         status.textContent = data.empty
-          ? 'No snapshots to replay.'
-          : 'Loaded ' + data.total + ' snapshot(s). Press Play.';
+          ? 'No change-feed history to replay.'
+          : 'Loaded ' + data.total + ' change(s). Press Play.';
         status.className = data.empty ? 'status err' : 'status ok';
       } catch (e) {
         status.textContent = 'Catalog failed: ' + e.message;

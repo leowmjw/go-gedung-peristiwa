@@ -71,7 +71,7 @@ func TestPollCoordinatorOneRegionPerTick(t *testing.T) {
 	now := time.Now()
 
 	seen := make(map[string]int)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		feeds, regions, err := coord.FeedsForScheduledPoll(now)
 		if err != nil {
 			t.Fatal(err)

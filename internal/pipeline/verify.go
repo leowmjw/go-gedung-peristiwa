@@ -49,13 +49,13 @@ func (p *Pipeline) Verify(ctx context.Context, emissions []eventgen.Emission) (R
 			return res, fmt.Errorf("tenant %s: %w", tenantID, err)
 		}
 
-		tailN, err := tp.TailCatchUp(ctx)
+		tailN, err := tp.ChangeFeedCount(ctx)
 		if err != nil {
-			return res, fmt.Errorf("tail %s: %w", tenantID, err)
+			return res, fmt.Errorf("change feed %s: %w", tenantID, err)
 		}
 		res.TailCountByTenant[tenantID] = tailN
 		if tailN < len(wantKeys) {
-			return res, fmt.Errorf("tenant %s: tail saw %d keys, want >= %d", tenantID, tailN, len(wantKeys))
+			return res, fmt.Errorf("tenant %s: change feed saw %d changes, want >= %d", tenantID, tailN, len(wantKeys))
 		}
 	}
 

@@ -2,38 +2,29 @@ package demo
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"path"
-	"sort"
-	"strings"
 	"time"
 
-	"github.com/ankur-anand/isledb/blobstore"
-	isledbmanifest "github.com/ankur-anand/isledb/manifest"
-
 	"github.com/leow/go-gedung-peristiwa/internal/gtfs"
+	"github.com/leow/go-gedung-peristiwa/internal/pipeline"
 )
 
-// ManifestSnapshot is one durable manifest point in object storage (snapshot file or manifest log entry).
-type ManifestSnapshot struct {
+// FeedEntry is one catalog row derived from the durable change feed.
+type FeedEntry struct {
 	Agency      string    `json:"agency"`
-	ID          string    `json:"id"`
-	Size        int64     `json:"size"`
-	At          time.Time `json:"at"`
-	S3Key       string    `json:"s3Key"`
-	Source      string    `json:"source"` // "snapshot" or "log"
-	WatermarkNS int64     `json:"-"`
+	ChangeCount int       `json:"changeCount"`
+	From        time.Time `json:"from"`
+	To          time.Time `json:"to"`
 }
 
-// AgencyCatalog lists manifest snapshots for one agency (may be empty).
+// AgencyCatalog lists change-feed metadata for one agency (may be empty).
 type AgencyCatalog struct {
-	Agency    string             `json:"agency"`
-	Count     int                `json:"count"`
-	Snapshots []ManifestSnapshot `json:"snapshots"`
+	Agency  string      `json:"agency"`
+	Count   int         `json:"count"`
+	Entries []FeedEntry `json:"entries"`
 }
 
-// RegionCatalog is the sparse snapshot inventory for a map region.
+// RegionCatalog is the sparse change-feed inventory for a map region.
 type RegionCatalog struct {
 	RegionID string          `json:"regionId"`
 	Label    string          `json:"label"`
@@ -44,173 +35,29 @@ type RegionCatalog struct {
 	Notes    []string        `json:"notes,omitempty"`
 }
 
-// ListManifestSnapshots lists manifest snapshot files and, if none exist, flush events from manifest/log/.
-func (p *Pipeline) ListManifestSnapshots(ctx context.Context, agencyID string) ([]ManifestSnapshot, error) {
-	aw, ok := p.agencies[agencyID]
-	if !ok {
-		return nil, fmt.Errorf("unknown agency %q", agencyID)
-	}
-	return listManifestSnapshots(ctx, aw.store, agencyID)
+func agencyTimestampNS(key []byte) int64 {
+	return gtfs.TimestampNSFromKey(string(key))
 }
 
-func listManifestSnapshots(ctx context.Context, store *blobstore.Store, agencyID string) ([]ManifestSnapshot, error) {
-	out, err := listSnapshotManifestFiles(ctx, store, agencyID)
+func (p *Pipeline) summarizeAgencyFeed(ctx context.Context, aw *agencyWriter) (FeedEntry, error) {
+	sum, err := pipeline.SummarizeChangeFeed(ctx, aw.DB, agencyTimestampNS)
 	if err != nil {
-		return nil, err
+		return FeedEntry{}, err
 	}
-	if len(out) == 0 {
-		out, err = listManifestLogSnapshots(ctx, store, agencyID)
-		if err != nil {
-			return nil, err
-		}
+	entry := FeedEntry{
+		Agency:      aw.ID,
+		ChangeCount: sum.ChangeCount,
 	}
-	sortSnapshots(out)
-	return out, nil
+	if sum.From > 0 {
+		entry.From = time.Unix(0, sum.From)
+	}
+	if sum.To > 0 {
+		entry.To = time.Unix(0, sum.To)
+	}
+	return entry, nil
 }
 
-func listSnapshotManifestFiles(ctx context.Context, store *blobstore.Store, agencyID string) ([]ManifestSnapshot, error) {
-	result, err := store.List(ctx, blobstore.ListOptions{Prefix: "manifest/snapshots/"})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ManifestSnapshot, 0, len(result.Objects))
-	for _, obj := range result.Objects {
-		if obj.IsDir || !strings.HasSuffix(obj.Key, ".manifest") {
-			continue
-		}
-		id := snapshotIDFromObjectKey(obj.Key)
-		if id == "" {
-			continue
-		}
-		snap := ManifestSnapshot{
-			Agency: agencyID,
-			ID:     id,
-			Size:   obj.Size,
-			S3Key:  path.Join("manifest", "snapshots", id+".manifest"),
-			Source: "snapshot",
-		}
-		data, _, err := store.Read(ctx, store.ManifestSnapshotPath(id))
-		if err == nil {
-			snap.At, snap.WatermarkNS = snapshotTimes(data)
-		}
-		out = append(out, snap)
-	}
-	return out, nil
-}
-
-func listManifestLogSnapshots(ctx context.Context, store *blobstore.Store, agencyID string) ([]ManifestSnapshot, error) {
-	objs, err := store.ListManifestLogs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ManifestSnapshot, 0, len(objs))
-	for _, obj := range objs {
-		if obj.IsDir || !strings.HasSuffix(obj.Key, ".json") {
-			continue
-		}
-		id := strings.TrimSuffix(path.Base(obj.Key), ".json")
-		logKey := store.ManifestLogPath(id)
-		data, _, err := store.Read(ctx, logKey)
-		if err != nil {
-			continue
-		}
-		entry, err := isledbmanifest.DecodeLogEntry(data)
-		if err != nil {
-			continue
-		}
-		switch entry.Op {
-		case isledbmanifest.LogOpAddSSTable, isledbmanifest.LogOpCheckpoint:
-		default:
-			continue
-		}
-		at := entry.Timestamp
-		wm := int64(0)
-		if entry.SSTable != nil {
-			if entry.SSTable.CreatedAt.After(at) {
-				at = entry.SSTable.CreatedAt
-			}
-			if len(entry.SSTable.MaxKey) > 0 {
-				wm = gtfs.TimestampNSFromKey(string(entry.SSTable.MaxKey))
-			}
-		}
-		if entry.Checkpoint != nil {
-			_, ckWM := snapshotTimesFromManifest(entry.Checkpoint)
-			if ckWM > wm {
-				wm = ckWM
-			}
-		}
-		if wm <= 0 {
-			wm = at.UnixNano()
-		}
-		if at.IsZero() {
-			at = time.Unix(0, wm)
-		}
-		out = append(out, ManifestSnapshot{
-			Agency:      agencyID,
-			ID:          id,
-			Size:        obj.Size,
-			At:          at,
-			S3Key:       path.Join("manifest", "log", id+".json"),
-			Source:      "log",
-			WatermarkNS: wm,
-		})
-	}
-	return out, nil
-}
-
-func sortSnapshots(out []ManifestSnapshot) {
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].At.Equal(out[j].At) {
-			return out[i].At.After(out[j].At)
-		}
-		return out[i].ID > out[j].ID
-	})
-}
-
-func snapshotIDFromObjectKey(key string) string {
-	base := path.Base(key)
-	return strings.TrimSuffix(base, ".manifest")
-}
-
-func snapshotTimes(data []byte) (time.Time, int64) {
-	var m isledbmanifest.Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return time.Time{}, 0
-	}
-	return snapshotTimesFromManifest(&m)
-}
-
-func snapshotTimesFromManifest(m *isledbmanifest.Manifest) (time.Time, int64) {
-	var maxAt time.Time
-	var maxWM int64
-	walkSST := func(s isledbmanifest.SSTMeta) {
-		if s.CreatedAt.After(maxAt) {
-			maxAt = s.CreatedAt
-		}
-		if len(s.MaxKey) > 0 {
-			if wm := gtfs.TimestampNSFromKey(string(s.MaxKey)); wm > maxWM {
-				maxWM = wm
-			}
-		}
-	}
-	for _, s := range m.L0SSTs {
-		walkSST(s)
-	}
-	for _, run := range m.SortedRuns {
-		for _, s := range run.SSTs {
-			walkSST(s)
-		}
-	}
-	if maxAt.IsZero() && m.WriterFence != nil {
-		maxAt = m.WriterFence.ClaimedAt
-	}
-	if maxWM <= 0 && !maxAt.IsZero() {
-		maxWM = maxAt.UnixNano()
-	}
-	return maxAt, maxWM
-}
-
-// CatalogForRegion returns manifest snapshot inventory for all agencies in a region.
+// CatalogForRegion returns change-feed inventory for all agencies in a region.
 func (p *Pipeline) CatalogForRegion(ctx context.Context, regionID string) (RegionCatalog, error) {
 	rgn, err := gtfs.RegionByID(regionID)
 	if err != nil {
@@ -220,8 +67,8 @@ func (p *Pipeline) CatalogForRegion(ctx context.Context, regionID string) (Regio
 		RegionID: rgn.ID,
 		Label:    rgn.Label,
 		Notes: []string{
-			"Catalog lists IsleDB manifest snapshots (manifest/snapshots) or manifest log flush events when snapshots are absent.",
-			"Playback uses key timestamps up to each snapshot watermark (not a pinned manifest reader).",
+			"Catalog summarizes IsleDB change-feed history (full PUT values).",
+			"Playback walks committed mutations in writer order and dedupes to latest per vehicle.",
 		},
 	}
 	for _, agencyID := range rgn.Agencies {
@@ -230,21 +77,21 @@ func (p *Pipeline) CatalogForRegion(ctx context.Context, regionID string) (Regio
 			cat.Agencies = append(cat.Agencies, AgencyCatalog{Agency: agencyID, Count: 0})
 			continue
 		}
-		snaps, err := listManifestSnapshots(ctx, aw.store, agencyID)
+		entry, err := p.summarizeAgencyFeed(ctx, aw)
 		if err != nil {
 			return RegionCatalog{}, fmt.Errorf("agency %s: %w", agencyID, err)
 		}
 		cat.Agencies = append(cat.Agencies, AgencyCatalog{
-			Agency:    agencyID,
-			Count:     len(snaps),
-			Snapshots: snaps,
+			Agency:  agencyID,
+			Count:   entry.ChangeCount,
+			Entries: []FeedEntry{entry},
 		})
-		cat.Total += len(snaps)
+		cat.Total += entry.ChangeCount
 	}
 	if cat.Total == 0 {
 		cat.Empty = true
 		cat.Message = fmt.Sprintf(
-			"No manifest snapshots in storage for %s. Poll this region on the live map and wait for writer flush (~5s).",
+			"No change-feed history for %s. Poll this region on the live map and wait for writer flush (~5s).",
 			rgn.Label,
 		)
 	}

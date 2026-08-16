@@ -13,7 +13,7 @@ import (
 	"github.com/leow/go-gedung-peristiwa/internal/gtfs"
 )
 
-// ReplaySource catalogs manifest snapshots and runs historical playback.
+// ReplaySource catalogs change-feed history and runs historical playback.
 type ReplaySource interface {
 	CatalogForRegion(ctx context.Context, regionID string) (demopkg.RegionCatalog, error)
 	RunReplay(ctx context.Context, opts demopkg.ReplayOptions, onFrame demopkg.ReplayFrameFunc) error
@@ -72,10 +72,24 @@ func (s *Server) handleReplayStream(w http.ResponseWriter, r *http.Request) {
 		speed = 1
 	}
 	opts := demopkg.ReplayOptions{
-		RegionID:       regionID,
-		Speed:          speed,
-		FromSnapshotID: r.URL.Query().Get("from"),
-		ToSnapshotID:   r.URL.Query().Get("to"),
+		RegionID: regionID,
+		Speed:    speed,
+	}
+	if from := r.URL.Query().Get("from"); from != "" {
+		t, err := time.Parse(time.RFC3339, from)
+		if err != nil {
+			http.Error(w, "invalid from timestamp", http.StatusBadRequest)
+			return
+		}
+		opts.From = t
+	}
+	if to := r.URL.Query().Get("to"); to != "" {
+		t, err := time.Parse(time.RFC3339, to)
+		if err != nil {
+			http.Error(w, "invalid to timestamp", http.StatusBadRequest)
+			return
+		}
+		opts.To = t
 	}
 
 	initSSE(w)

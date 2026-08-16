@@ -19,7 +19,7 @@ Keep the **browser JSON contract** aligned: `/api/regions`, `/api/region`, `/api
 
 ## Architecture decisions
 
-- **CQRS stays:** Worker writes R2 + D1 projection; the map reads D1. Do not attach live UI to `TailingReader` / per-key SSE (see repo `AGENTS.md` IsleDB learnings).
+- **CQRS stays:** Worker writes R2 + D1 projection; the map reads D1. Do not attach live UI to per-mutation ChangeFeed / per-key SSE (see repo `AGENTS.md` IsleDB learnings).
 - **Fetches for live, SSE for replay:** long-lived live EventSource on Workers repeats the KL demo flood. Replay SSE is a single session stream of distinct R2 frames.
 - **No `strings.Replace` patches:** bake Worker behaviour into `templates.go` (`regionAgencies`, D1 batches of 90, `knownRegion` 400, poll skip).
 - **Wrangler pin = workerd max date:** `mise.toml` `wrangler = "4.118.0"` only accepts `compatibility_date` **≤ 2026-08-06**. A newer date (e.g. 2026-08-16) fails: *newest date supported by this server binary is 2026-08-06*. Bump wrangler **and** the date together, then re-verify `mise run sites:test`.

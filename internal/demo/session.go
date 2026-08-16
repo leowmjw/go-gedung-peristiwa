@@ -27,7 +27,7 @@ const SessionHeartbeatInterval = time.Minute
 type sessionState struct {
 	Region      string    `json:"region"`
 	PollSeconds int       `json:"pollSeconds,omitempty"`
-	LastSeen    time.Time `json:"lastSeen,omitempty"`
+	LastSeen    time.Time `json:"lastSeen"`
 }
 
 // SessionStore tracks per-browser region and poll-interval selection.

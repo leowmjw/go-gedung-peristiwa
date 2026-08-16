@@ -42,7 +42,6 @@ func run() int {
 
 	allFeeds := gtfs.AllFeeds()
 	cfg := pipeline.StoreConfigFromEnv(b, "demo-kl")
-	cfg.CacheRoot = "tmp/cache/demo-kl"
 
 	pipe, err := demo.NewPipeline(ctx, cfg, allFeeds)
 	if err != nil {
@@ -117,7 +116,7 @@ func pollLoop(ctx context.Context, interval time.Duration, poller *gtfs.Poller, 
 			return
 		}
 		if len(all) > 0 {
-			puts, err := pipe.Write(all)
+			puts, err := pipe.Write(ctx, all)
 			if err != nil {
 				slog.Error("write failed", "err", err)
 				return

@@ -33,7 +33,7 @@ func TestPipelineMemoryIntegration(t *testing.T) {
 	}
 	defer p.Close(ctx)
 
-	puts, err := p.WriteEmissions(emissions)
+	puts, err := p.WriteEmissions(ctx, emissions)
 	if err != nil {
 		t.Fatal(err)
 	}

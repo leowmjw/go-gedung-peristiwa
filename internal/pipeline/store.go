@@ -1,13 +1,10 @@
 package pipeline
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/ankur-anand/isledb/blobstore"
 )
 
 type Backend string
@@ -32,7 +29,7 @@ func StoreConfigFromEnv(backend Backend, prefixSuffix string) StoreConfig {
 	cfg := StoreConfig{
 		Backend:      backend,
 		PrefixRoot:   prefixSuffix,
-		CacheRoot:    "tmp/cache",
+		CacheRoot:    DefaultCacheRoot,
 		MinEndpoint:  envOr("MINIO_ENDPOINT", "localhost:9000"),
 		MinBucket:    envOr("MINIO_BUCKET", "gedung-peristiwa"),
 		TigrisBucket: envOr("TIGRIS_BUCKET", envOr("MINIO_BUCKET", "gedung-peristiwa")),
@@ -53,30 +50,6 @@ func tenantPrefix(tenantID, suffix string) string {
 		base = tenantID + "-" + suffix
 	}
 	return base
-}
-
-func openStore(ctx context.Context, cfg StoreConfig, tenantID string) (*blobstore.Store, error) {
-	prefix := tenantPrefix(tenantID, cfg.PrefixRoot)
-	switch cfg.Backend {
-	case BackendMemory:
-		return blobstore.NewMemory(prefix), nil
-	case BackendMinIO:
-		ensureS3Env(cfg)
-		if err := ensureBucket(ctx, cfg); err != nil {
-			return nil, fmt.Errorf("ensure bucket: %w", err)
-		}
-		url := minioBucketURL(cfg.MinBucket, cfg.MinEndpoint)
-		return blobstore.Open(ctx, url, prefix)
-	case BackendTigris:
-		ensureS3Env(cfg)
-		if err := ensureBucket(ctx, cfg); err != nil {
-			return nil, fmt.Errorf("ensure bucket: %w", err)
-		}
-		url := tigrisBucketURL(cfg.TigrisBucket)
-		return blobstore.Open(ctx, url, prefix)
-	default:
-		return nil, fmt.Errorf("unknown backend %q", cfg.Backend)
-	}
 }
 
 // ensureS3Env maps MinIO credentials to AWS env vars for gocloud s3blob.
@@ -118,11 +91,6 @@ func tigrisBucketURL(bucket string) string {
 
 func cacheDir(cfg StoreConfig, tenantID string) string {
 	return filepath.Join(cfg.CacheRoot, tenantPrefix(tenantID, cfg.PrefixRoot))
-}
-
-// OpenAgencyStore opens a blob store for an agency/tenant prefix.
-func OpenAgencyStore(ctx context.Context, cfg StoreConfig, agencyID string) (*blobstore.Store, error) {
-	return openStore(ctx, cfg, agencyID)
 }
 
 // AgencyCacheDir returns the on-disk cache path for an agency prefix.

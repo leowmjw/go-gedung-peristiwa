@@ -97,20 +97,11 @@ routing, testing/synctest
 
 ### Next agent: Historical replay (priority demo feature)
 
-**Status:** Implemented — `GET /replay`, `GET /api/replay/catalog`, `GET /api/replay/stream` (batch `event: vehicles`, separate from live SSE). Catalog lists `manifest/snapshots/*.manifest` or falls back to `manifest/log` flush events when snapshot files are absent.
+**Status:** Implemented — `GET /replay`, `GET /api/replay/catalog`, `GET /api/replay/stream` (batch `event: vehicles`, separate from live SSE). Catalog summarizes IsleDB **change-feed** history per agency; playback walks `ChangeReader` from Oldest with optional RFC3339 `from`/`to` filters.
 
-**Goal:** Playback stored vehicle positions from IsleDB — scrubber + speed (1×, 10×, 60×). **Not** live SSE tail.
+**Do not** attach live map SSE to per-mutation ChangeFeed fan-out (same UX problem as old TailingReader).
 
-**Do not** attach live map SSE to `TailingReader.Tail` (see IsleDB Learnings — per-key fan-out broke the UI).
-
-**Suggested approach:**
-1. New route/page or mode, e.g. `GET /replay` + `GET /api/replay/stream` (or WebSocket), separate from `/api/vehicles/stream`.
-2. One background reader per replay session: `ScanLatest` / `CatchUp` on agency prefixes, or time-filtered scan; dedupe by `agency:vehicle_id`; batch patches to client (same `vehicles` JSON shape as live).
-3. Reuse `internal/demo/pipeline.go` — `TailUpdates` / agency `scan` are starting points; `cmd/isledb-debug` for tail visibility experiments.
-4. Keys are `{agency}:{vehicle_id}:{timestamp_ns}` — replay must pick latest per vehicle per playback time or walk timeline.
-5. Tests: memory backend, no GTFS; unit test replay dedupe + ordering.
-
-**Live UI contract (keep):** `Write` → `FlushAll` → `NotifyPoll` → in-memory `LatestPositionsFor` → SSE. Replay is a separate read path.
+**Live UI contract (keep):** `Write` → `FlushAll` → `NotifyPoll` → in-memory `LatestPositionsFor` → SSE. Replay is a separate ChangeFeed read path.
 
 See **Future Ideas / Roadmap** below for remaining demo polish.
 
@@ -121,7 +112,7 @@ See **Future Ideas / Roadmap** below for remaining demo polish.
   does not display it yet — data is available for analytics, exports, and future views
   without re-fetching GTFS history.
 - **Live UI stays on the in-memory read model** (`LatestPositions`, updated in `Write`)
-  plus `NotifyPoll` batch SSE — not `TailingReader` per browser client.
+  plus `NotifyPoll` batch SSE — not per-mutation ChangeFeed to each browser client.
 - Rationale: tail replay + per-key fan-out is wrong for live SSE; write-through + projection
   is correct CQRS (see **IsleDB Learnings**).
 
@@ -143,109 +134,58 @@ See **Future Ideas / Roadmap** below for remaining demo polish.
 - Temporal workflows for long-running ingest / replay jobs
 - Tigris-specific APIs beyond S3
 
-## IsleDB Learnings (v0.4.2)
+## IsleDB Learnings (v0.5.0)
 
-### ChangeFeed does not exist
-Pinned `github.com/ankur-anand/isledb@v0.4.2` has **no `ChangeFeed` field** on `WriterOptions`.
-`DEMO.md` / `TECHSPEC.md` references to `opts.ChangeFeed.Enabled` are aspirational.
-Use `FlushInterval` on the writer + `TailingReader` (`CatchUp` / `Tail`) for ordered replay.
+Pinned `github.com/ankur-anand/isledb@v0.5.0`. v0.4 prefixes are incompatible; fresh data under `gedung-peristiwa` bucket, reader cache under `data/cache/gedung-peristiwa/`.
 
-### TailingReader is fine for batch verification, flaky for live UI fan-out
-FinTech simulation (`internal/pipeline/tenant.go` → `TailCatchUp`) works: one-shot
-catch-up after flush, assert key count in tests.
+### v0.5 API (what we use)
 
-**Why live SSE + `TailingReader.Tail` failed in the KL demo** (first render OK, map
-stuck thereafter):
+- `isledb.Open` / `OpenBucket` with `DBOptions{Prefix, ChangeFeed: {Payload: ChangeFeedFullValues}}`
+- One `Writer`, one long-lived `Reader`, one `Maintenance` per prefix (`OpenPrefixDB` in `internal/pipeline/db.go`)
+- `Writer.Put(ctx, …)` / `Flush(ctx)` — visibility boundary; `WriterOptions.Flush.Interval` for background flush
+- `OpenChangeReader` + `Read` until `CaughtUp()` — replay, verify, startup hydration
+- `Maintenance.Run` in-process for demo/simulate; `RunOnce` in tests/close
+- **Removed in v0.5:** `OpenDB`, `OpenCompactor`, `TailingReader`, public `manifest/` package
 
-| Factor | Effect |
-|---|---|
-| Historical replay | Each SSE client opens new tailers per agency; `Tail` replays all existing keys on connect — duplicates the initial `ScanLatest` snapshot |
-| Per-key fan-out | One SSE `vehicle` event + `stats` per tailed key (~164/poll) overwhelms the browser EventSource queue |
-| Object-store visibility | Writer flush → manifest/SST visible on MinIO has latency; 500ms `PollInterval` tail loop can miss or delay updates |
-| Same-process writer + tailer | Demo writes and tails the same prefix in one process; refresh timing is harder to reason about than read-only tailers |
-| Channel backpressure | `TailUpdates` uses a buffered chan (256); tail replay can fill it while the HTTP handler is still draining stale keys |
+### ChangeFeed is real — live UI still must not fan out per mutation
 
-**Symptom:** stats may tick (polling works), markers render once, then do not move on
-subsequent 30s GTFS polls.
+ChangeFeed writes ordered batches under `changes/`. We enable `ChangeFeedFullValues` on every database.
 
-**Demo fix (current):** do **not** tail for the browser. After each poll
-`Write` + `FlushAll`, call `Pipeline.NotifyPoll()`; SSE handlers push
-`Pipeline.LatestPositions()` (in-memory latest per `agency:vehicle_id`) as a
-batch `event: vehicles`. IsleDB remains the durable write path; UI reads memory.
+**Live map:** write-through IsleDB + in-memory `vehicleSeen` + `NotifyPoll` batch SSE (`event: vehicles`). Do **not** stream every `Change` to the browser.
 
-Code: `internal/demo/pipeline.go` (`NotifyPoll`, `SubscribePolls`, `LatestPositions`),
-`internal/web/demo/server.go` (`handleVehicleStream`), `cmd/demo/main.go` (calls
-`NotifyPoll` after poll).
+**Startup hydration:** `NewPipeline` drains each agency feed from `Bounds().Oldest` into `vehicleSeen`.
 
-### How to reproduce / test tailing separately (another session)
+**Replay / verify:** walk `ChangeReader`; FinTech `Verify` counts feed changes ≥ unique keys.
 
-**Unit test (passes, memory backend):**
-```bash
-go test ./internal/demo/ -run TestPipelineWriteScanTail -v
-```
-Writes positions, flushes, asserts `TailUpdates` receives at least one event.
+### Why we abandoned TailingReader for live SSE (historical note)
 
-**Simulate the UI failure (MinIO, tail-driven SSE):**
-1. Temporarily revert `handleVehicleStream` to use `TailUpdates` instead of
-   `SubscribePolls` (or checkout pre-notify commit).
-2. `mise run demo` → open http://localhost:8081
-3. Confirm first marker render; wait 30–60s for next GTFS poll
-4. Observe: `Updated` time may change but markers stay static; Network tab shows
-   flood of `event: vehicle` lines, not a clean `event: vehicles` refresh
+v0.4 `TailingReader.Tail` replayed all keys on connect and emitted per-key events (~164/poll), flooding EventSource. v0.5 ChangeFeed has the same fan-out risk if wired directly to live SSE. Batch projection remains correct CQRS.
 
-**Compare with working path:**
-```bash
-curl -sN --max-time 65 http://localhost:8081/api/vehicles/stream | rg 'event: vehicles'
-```
-Expect **≥2** `event: vehicles` lines across one poll interval (initial + post-poll).
-Tail-only path sends hundreds of `event: vehicle` lines and rarely updates the map.
+**Demo fix (current):** after each poll `Write` + `FlushAll` → `NotifyPoll()` → SSE reads `LatestPositionsFor`.
 
-**Key format note:** `{agency}:{vehicle_id}:{timestamp_ns}` — each poll creates new
-keys; tail emits every key, but UI dedupes by `agency:vehicle_id`. Compaction does
-not help the live tail fan-out problem.
+Code: `internal/demo/pipeline.go`, `internal/web/demo/server.go`, `cmd/demo/main.go`.
 
-### Debug harness: isolate IsleDB vs MinIO vs Tigris (no demo required)
+### Debug harness: ChangeReader vs object-store visibility
 
-Use `cmd/isledb-debug` — minimal writer + `TailingReader` on a throwaway prefix.
-No GTFS, HTTP, or map. Answers: **is tail flakiness IsleDB core or S3 visibility?**
+Use `cmd/isledb-debug` — minimal writer + `ChangeReader` on a throwaway prefix.
 
 ```bash
-mise run dev:isledb-debug              # memory baseline (~instant visibility)
-mise run dev:isledb-debug-minio        # local MinIO (needs MinIO up)
-mise run dev:isledb-debug-tigris       # Tigris (needs creds in .env)
+mise run dev:isledb-debug              # memory baseline
+mise run dev:isledb-debug-minio        # local MinIO
+mise run dev:isledb-debug-tigris       # Tigris creds
 mise run dev:isledb-debug-compare      # memory + MinIO back-to-back
 ```
 
-Single experiment flags:
-```bash
-go run ./cmd/isledb-debug/ --backend minio --experiment visibility
-go run ./cmd/isledb-debug/ --backend tigris --experiment incremental --wait 15s
-```
-
-| Experiment | What it tests | Healthy signal | Suggests bug in |
-|---|---|---|---|
-| `visibility` | Write batch-2, flush, CatchUp after 0–5000ms delays | `keys_seen=5` by ≤500ms on memory; MinIO may need longer | Object-store manifest/SST visibility if memory OK but MinIO/Tigris slow |
-| `incremental` | `Tail` running, then write+flush new batch | `tail_events=5`, `timeout=false`, `first_new_ms` < 2s | IsleDB `Tail` loop or same-process refresh if **all** backends timeout |
-| `replay` | `Tail` with no new writes for 2s | `replay_events_in_2000ms` > 0 | Explains demo SSE flood (historical replay), not a storage bug |
-
-**How to read compare output:**
-
-1. **Memory passes, MinIO/Tigris fail `incremental` or high `visibility` delay** → S3-compatible
-   layer (eventual consistency, list/head latency). Mitigation: poll+broadcast UI (current demo),
-   or separate tailer process, or longer tail `PollInterval` + reader `Refresh`.
-2. **All backends fail `incremental`** → IsleDB `TailingReader.Tail` behaviour or harness bug;
-   file issue upstream with repro from `internal/isledbdebug/`.
-3. **All pass but demo SSE still stuck** → UI/integration issue (per-key SSE flood, EventSource),
-   not IsleDB storage — see replay experiment counts.
+| Experiment | What it tests | Healthy signal |
+|---|---|---|
+| `visibility` | flush batch-2 → poll ChangeReader after delays | `keys_seen=5` by ≤500ms memory; MinIO may need longer |
+| `incremental` | drain to head → write+flush → poll feed | `feed_events=5`, `first_new_ms` < 2s |
+| `replay` | count feed from Oldest after seed flush | `replay_events` > 0 |
 
 **Unit tests (no external deps):**
 ```bash
 go test ./internal/isledbdebug/... -v
+go test ./internal/demo/ -run TestPipelineWriteScanChangeFeed -v
 ```
 
-**Agent next steps if MinIO-specific:** sweep `--wait`, writer `FlushInterval`, tail
-`PollInterval`, and `reader.Refresh()` before `CatchUp` in harness; bisect minimum delay.
-If Tigris same as MinIO → not MinIO-specific. If only MinIO → check path-style endpoint,
-`AWS_S3_USE_PATH_STYLE`, bucket CAS timing.
-
-Code: `internal/isledbdebug/harness.go`, `cmd/isledb-debug/main.go`.
+Code: `internal/isledbdebug/harness.go`, `internal/pipeline/db.go`, `cmd/isledb-debug/main.go`.

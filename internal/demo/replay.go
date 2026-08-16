@@ -6,17 +6,20 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ankur-anand/isledb"
+
 	"github.com/leow/go-gedung-peristiwa/internal/gtfs"
+	"github.com/leow/go-gedung-peristiwa/internal/pipeline"
 )
 
 const replayFrameInterval = time.Second
 
-// ReplayOptions configures historical playback over manifest snapshot timelines.
+// ReplayOptions configures historical playback over the change feed.
 type ReplayOptions struct {
-	RegionID       string
-	Speed          int // 1, 10, or 60
-	FromSnapshotID string
-	ToSnapshotID   string
+	RegionID string
+	Speed    int // 1, 10, or 60
+	From     time.Time
+	To       time.Time
 }
 
 // ReplayProgress is sent with each replay frame.
@@ -29,25 +32,25 @@ type ReplayProgress struct {
 // ReplayFrameFunc receives merged vehicle positions for one timeline frame.
 type ReplayFrameFunc func(positions []gtfs.VehiclePosition, progress ReplayProgress) error
 
-type replayFrameEvent struct {
-	agency     string
-	snapshotID string
-	at         time.Time
-	watermark  int64
+type replayFrame struct {
+	at time.Time
 }
 
-// RunReplay walks the merged per-agency manifest snapshot timeline for a region.
-// IsleDB OpenReader reads CURRENT topology; each frame approximates state after snapshot S
-// by scanning keys with timestamp_ns <= watermark(S).
+type replayMutation struct {
+	at  time.Time
+	pos gtfs.VehiclePosition
+}
+
+// RunReplay walks the merged per-agency change feed for a region.
 func (p *Pipeline) RunReplay(ctx context.Context, opts ReplayOptions, onFrame ReplayFrameFunc) error {
 	if opts.Speed <= 0 {
 		opts.Speed = 1
 	}
-	events, err := p.buildReplayTimeline(ctx, opts)
+	frames, err := p.buildReplayFrames(ctx, opts)
 	if err != nil {
 		return err
 	}
-	if len(events) == 0 {
+	if len(frames) == 0 {
 		return nil
 	}
 
@@ -63,21 +66,13 @@ func (p *Pipeline) RunReplay(ctx context.Context, opts ReplayOptions, onFrame Re
 	merged := make(map[string]gtfs.VehiclePosition)
 	delay := replayFrameInterval / time.Duration(opts.Speed)
 
-	for i, ev := range events {
+	for i, frame := range frames {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		aw, ok := p.agencies[ev.agency]
-		if !ok {
-			continue
-		}
-		positions, err := aw.scanThrough(ctx, ev.watermark)
-		if err != nil {
-			return fmt.Errorf("scan %s: %w", ev.agency, err)
-		}
-		for _, pos := range positions {
-			key := pos.Agency + ":" + pos.VehicleID
-			merged[key] = pos
+		for _, mut := range frame.mutations {
+			key := mut.pos.Agency + ":" + mut.pos.VehicleID
+			merged[key] = mut.pos
 		}
 		out := make([]gtfs.VehiclePosition, 0, len(merged))
 		for _, pos := range merged {
@@ -87,13 +82,13 @@ func (p *Pipeline) RunReplay(ctx context.Context, opts ReplayOptions, onFrame Re
 		}
 		prog := ReplayProgress{
 			Frame: i + 1,
-			Total: len(events),
-			At:    ev.at,
+			Total: len(frames),
+			At:    frame.at,
 		}
 		if err := onFrame(out, prog); err != nil {
 			return err
 		}
-		if i+1 < len(events) {
+		if i+1 < len(frames) {
 			if err := sleepCtx(ctx, delay); err != nil {
 				return err
 			}
@@ -102,46 +97,80 @@ func (p *Pipeline) RunReplay(ctx context.Context, opts ReplayOptions, onFrame Re
 	return nil
 }
 
-func (p *Pipeline) buildReplayTimeline(ctx context.Context, opts ReplayOptions) ([]replayFrameEvent, error) {
-	cat, err := p.CatalogForRegion(ctx, opts.RegionID)
+type replayFrameBucket struct {
+	at        time.Time
+	mutations []replayMutation
+}
+
+func (p *Pipeline) buildReplayFrames(ctx context.Context, opts ReplayOptions) ([]replayFrameBucket, error) {
+	region, err := gtfs.RegionByID(opts.RegionID)
 	if err != nil {
 		return nil, err
 	}
-	var events []replayFrameEvent
-	for _, ac := range cat.Agencies {
-		for _, snap := range ac.Snapshots {
-			if opts.FromSnapshotID != "" && snap.ID < opts.FromSnapshotID {
-				continue
+
+	var mutations []replayMutation
+	for _, agencyID := range region.Agencies {
+		aw, ok := p.agencies[agencyID]
+		if !ok {
+			continue
+		}
+		if err := pipeline.RefreshReader(ctx, aw.Reader); err != nil {
+			return nil, err
+		}
+		_, err := pipeline.DrainChangeFeed(ctx, aw.DB, func(ch isledb.Change) error {
+			if ch.Operation != isledb.ChangePut {
+				return nil
 			}
-			if opts.ToSnapshotID != "" && snap.ID > opts.ToSnapshotID {
-				continue
+			pos, err := gtfs.ParseVehiclePosition(ch.Value)
+			if err != nil {
+				return nil
 			}
-			at := snap.At
-			wm := snap.WatermarkNS
-			if wm <= 0 {
-				wm = at.UnixNano()
+			if !opts.From.IsZero() && pos.Timestamp.Before(opts.From) {
+				return nil
 			}
-			if wm <= 0 {
-				wm = time.Now().UnixNano()
+			if !opts.To.IsZero() && pos.Timestamp.After(opts.To) {
+				return nil
 			}
-			events = append(events, replayFrameEvent{
-				agency:     snap.Agency,
-				snapshotID: snap.ID,
-				at:         at,
-				watermark:  wm,
+			mutations = append(mutations, replayMutation{
+				at:  pos.Timestamp.Truncate(time.Second),
+				pos: pos,
 			})
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("change feed %s: %w", agencyID, err)
 		}
 	}
-	sort.Slice(events, func(i, j int) bool {
-		if !events[i].at.Equal(events[j].at) {
-			return events[i].at.Before(events[j].at)
+
+	sort.Slice(mutations, func(i, j int) bool {
+		if !mutations[i].at.Equal(mutations[j].at) {
+			return mutations[i].at.Before(mutations[j].at)
 		}
-		if events[i].agency != events[j].agency {
-			return events[i].agency < events[j].agency
+		if mutations[i].pos.Agency != mutations[j].pos.Agency {
+			return mutations[i].pos.Agency < mutations[j].pos.Agency
 		}
-		return events[i].snapshotID < events[j].snapshotID
+		return mutations[i].pos.VehicleID < mutations[j].pos.VehicleID
 	})
-	return events, nil
+
+	if len(mutations) == 0 {
+		return nil, nil
+	}
+
+	buckets := make([]replayFrameBucket, 0)
+	var current replayFrameBucket
+	for _, mut := range mutations {
+		if len(current.mutations) == 0 || !current.at.Equal(mut.at) {
+			if len(current.mutations) > 0 {
+				buckets = append(buckets, current)
+			}
+			current = replayFrameBucket{at: mut.at}
+		}
+		current.mutations = append(current.mutations, mut)
+	}
+	if len(current.mutations) > 0 {
+		buckets = append(buckets, current)
+	}
+	return buckets, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

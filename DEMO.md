@@ -221,29 +221,30 @@ Key:   {agency}:{vehicle_id}:{timestamp_ns}
 Value: {"lat":3.139,"lng":101.687,"bearing":45,"speed":12.5,"route":"U32","trip":"..."}
 ```
 
-The writer uses **ChangeFeed** so the tailing reader can stream new positions:
+Change feed is enabled at database open (`DBOptions.ChangeFeed` with `ChangeFeedFullValues`). Live map SSE uses in-memory projection + `NotifyPoll`, not per-mutation feed fan-out:
 
 ```go
-opts := isledb.DefaultWriterOptions()
-opts.ChangeFeed.Enabled = true
-opts.Flush.Interval = 5 * time.Second  // flush every 5s for near-real-time
+db, err := isledb.Open(ctx, bucketURL, isledb.DBOptions{
+    Prefix: agencyPrefix,
+    ChangeFeed: &isledb.ChangeFeedOptions{
+        Payload: isledb.ChangeFeedFullValues,
+    },
+})
+wOpts := isledb.DefaultWriterOptions()
+wOpts.Flush.Interval = 5 * time.Second
 ```
 
 ### Component: SSE Server (`internal/web/`)
 
 ```go
-func (s *Server) HandleVehicleStream(w http.ResponseWriter, r *http.Request) {
-    sse := datastar.NewSSE(w, r)
+func (s *Server) handleVehicleStream(w http.ResponseWriter, r *http.Request) {
+    // Initial + post-poll batch refresh from in-memory latest positions
+    positions := s.pipeline.LatestPositionsFor(regionAgencies)
+    writeSSE(w, "vehicles", toViews(positions))
 
-    // Initial load: scan all current positions
-    positions := s.pipeline.ScanAllCurrentPositions(ctx)
-    sse.PatchElements(renderMarkers(positions))
-    sse.PatchElements(renderStats(len(positions)))
-
-    // Tail for updates
-    for update := range s.pipeline.TailUpdates(ctx) {
-        sse.PatchElements(renderMarkerUpdate(update))
-        sse.PatchElements(renderStats(s.pipeline.VehicleCount()))
+    for range s.pipeline.SubscribePolls(r.Context()) {
+        positions := s.pipeline.LatestPositionsFor(regionAgencies)
+        writeSSE(w, "vehicles", toViews(positions))
     }
 }
 ```
@@ -346,7 +347,7 @@ The GTFS demo is structurally identical to a FinTech event pipeline:
 ### What the Demo Proves
 
 1. **Multi-tenant ingestion at scale** — 15 concurrent feeds, hundreds of vehicles
-2. **Real-time tailing** — IsleDB ChangeFeed → SSE → browser in <5s
+2. **Real-time updates** — GTFS poll → in-memory projection → batch SSE (`event: vehicles`)
 3. **Object storage durability** — All positions persisted to MinIO/Tigris as SSTs
 4. **Horizontal read scaling** — Map viewer is just a reader; add more readers freely
 5. **Compaction** — Old positions compacted away; storage stays bounded
@@ -410,7 +411,7 @@ internal/
 
 ### Phase 2: IsleDB Integration
 - [ ] One IsleDB prefix per agency
-- [ ] Write vehicle positions with ChangeFeed enabled
+- [x] Write vehicle positions with ChangeFeed enabled (v0.5 `DBOptions.ChangeFeed`)
 - [ ] Reader scans current positions per agency
 - [ ] Tailing reader streams new positions
 - [ ] Integration test with `blobstore.NewMemory()`

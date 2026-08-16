@@ -99,7 +99,7 @@ JSON-encoded event payload. Chosen for readability, debuggability, and stdlib su
 
 ### ChangeFeed
 
-Enabled on all writers. ChangeFeed writes seq-ordered mutation batches under `changes/`, providing a durable, ordered log of all writes — essential for audit trails in FinTech.
+Enabled via `DBOptions.ChangeFeed` with `ChangeFeedFullValues` on all prefixes. Each flush publishes an ordered mutation batch under `changes/`. FinTech verification and demo replay consume `OpenChangeReader`; live UI does not stream the feed directly.
 
 ---
 
@@ -482,7 +482,7 @@ run = "go run ./cmd/simulate/ --backend tigris"
 go 1.26.5
 
 require (
-    github.com/ankur-anand/isledb   v0.4.2   // Embedded LSM-tree on object storage
+    github.com/ankur-anand/isledb   v0.5.0   // Embedded LSM-tree on object storage
     github.com/google/uuid            latest   // UUID v7 idempotency keys
 )
 // Deferred: github.com/tigrisdata/storage-go (Tigris-specific APIs beyond S3)

@@ -45,7 +45,7 @@ func run() int {
 		backend    = flag.String("backend", "memory", "memory, minio, or tigris")
 		experiment = flag.String("experiment", "all", "visibility, incremental, replay, or all")
 		prefix     = flag.String("prefix-suffix", "", "unique prefix suffix (default: timestamp)")
-		wait       = flag.Duration("wait", 10*time.Second, "incremental tail wait timeout")
+		wait       = flag.Duration("wait", 10*time.Second, "incremental change-feed wait timeout")
 	)
 	flag.Parse()
 
@@ -65,7 +65,7 @@ func run() int {
 	h, err := isledbdebug.Open(ctx, b, *prefix)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open harness: %v\n", err)
-		fmt.Fprintln(os.Stderr, "→ next: check .env credentials, MinIO (`mise run minio-setup`), and tmp/cache/isledb-debug permissions")
+		fmt.Fprintln(os.Stderr, "→ next: check .env credentials, MinIO (`mise run minio-setup`), and data/cache/gedung-peristiwa permissions")
 		return 1
 	}
 	defer h.Close(ctx)
@@ -105,8 +105,8 @@ func runVisibility(ctx context.Context, h *isledbdebug.Harness, b pipeline.Backe
 		expected: fmt.Sprintf("keys_seen>=%d within %dms after flush", visibilityBatch, budget),
 	}
 
-	fmt.Printf("\n--- visibility (flush batch-2 → delay → CatchUp) [%s] ---\n", b)
-	fmt.Printf("what: write %d keys, flush, write %d more, flush, then CatchUp at increasing delays\n",
+	fmt.Printf("\n--- visibility (flush batch-2 → delay → ChangeReader) [%s] ---\n", b)
+	fmt.Printf("what: write %d keys, flush, write %d more, flush, then ChangeReader at increasing delays\n",
 		visibilityBatch, visibilityBatch)
 
 	rows, err := isledbdebug.RunVisibility(ctx, h, visibilityBatch)
@@ -147,7 +147,7 @@ func runVisibility(ctx context.Context, h *isledbdebug.Harness, b pipeline.Backe
 	case firstVisible > budget:
 		v.status = verdictFail
 		v.actual = fmt.Sprintf("first full visibility at %dms (budget %dms)", firstVisible, budget)
-		v.hint = "sweep tail PollInterval and reader Refresh in internal/isledbdebug/harness.go, then re-run --backend " + string(b)
+		v.hint = "sweep ChangeReader polling in internal/isledbdebug/harness.go, then re-run --backend " + string(b)
 	default:
 		v.status = verdictPass
 		v.actual = fmt.Sprintf("first full visibility at %dms (keys_seen=%d)", firstVisible, visibilityBatch)
@@ -159,18 +159,18 @@ func runIncremental(ctx context.Context, h *isledbdebug.Harness, b pipeline.Back
 	const priorKeys, newKeys = 10, 5
 	v := verdict{
 		name: "incremental",
-		expected: fmt.Sprintf("tail delivers %d/%d new keys, timeout=false, first_new_ms<%d",
+		expected: fmt.Sprintf("change feed delivers %d/%d new keys, timeout=false, first_new_ms<%d",
 			newKeys, newKeys, incrementalFirstNewMs),
 	}
 
-	fmt.Printf("\n--- incremental (Tail running → write batch → flush) [%s] ---\n", b)
-	fmt.Printf("what: seed %d keys, start Tail after checkpoint, write %d more, flush, wait for tail\n",
+	fmt.Printf("\n--- incremental (drain to head → write batch → flush → ChangeReader) [%s] ---\n", b)
+	fmt.Printf("what: seed %d keys, drain change feed to head, write %d more, flush, poll ChangeReader\n",
 		priorKeys, newKeys)
 
-	if err := h.WriteBatch(priorKeys, 1); err != nil {
+	if err := h.WriteBatch(ctx, priorKeys, 1); err != nil {
 		v.status = verdictFail
 		v.actual = "seed write failed: " + err.Error()
-		v.hint = "check tmp/cache/isledb-debug is writable, then re-run"
+		v.hint = "check data/cache/gedung-peristiwa is writable, then re-run"
 		return v
 	}
 	if err := h.Flush(ctx); err != nil {
@@ -189,17 +189,17 @@ func runIncremental(ctx context.Context, h *isledbdebug.Harness, b pipeline.Back
 		return v
 	}
 
-	fmt.Printf("wrote=%d tail_events=%d first_new_ms=%d timeout=%v (wait budget=%s)\n",
+	fmt.Printf("wrote=%d feed_events=%d first_new_ms=%d timeout=%v (wait budget=%s)\n",
 		res.WroteKeys, res.TailEvents, res.FirstNewKeyMs, res.Timeout, wait)
 
 	switch {
 	case res.Timeout:
 		v.status = verdictFail
-		v.actual = fmt.Sprintf("timeout after %s (tail_events=%d/%d)", wait, res.TailEvents, newKeys)
+		v.actual = fmt.Sprintf("timeout after %s (feed_events=%d/%d)", wait, res.TailEvents, newKeys)
 		v.hint = "re-run with longer wait: go run ./cmd/isledb-debug/ --backend " + string(b) + " --experiment incremental --wait 30s; then run `mise run dev:isledb-debug-compare`"
 	case res.TailEvents < res.WroteKeys:
 		v.status = verdictFail
-		v.actual = fmt.Sprintf("tail_events=%d/%d", res.TailEvents, res.WroteKeys)
+		v.actual = fmt.Sprintf("feed_events=%d/%d", res.TailEvents, res.WroteKeys)
 		v.hint = "ensure MinIO is up (`mise run minio-setup`), increase --wait, and compare memory vs " + string(b)
 	case res.FirstNewKeyMs >= incrementalFirstNewMs:
 		v.status = verdictFail
@@ -207,7 +207,7 @@ func runIncremental(ctx context.Context, h *isledbdebug.Harness, b pipeline.Back
 		v.hint = "do not rely on tail for live UI — verify demo uses NotifyPoll/LatestPositions (internal/demo/pipeline.go)"
 	default:
 		v.status = verdictPass
-		v.actual = fmt.Sprintf("tail_events=%d/%d, first_new_ms=%d", res.TailEvents, res.WroteKeys, res.FirstNewKeyMs)
+		v.actual = fmt.Sprintf("feed_events=%d/%d, first_new_ms=%d", res.TailEvents, res.WroteKeys, res.FirstNewKeyMs)
 	}
 	return v
 }
@@ -216,17 +216,17 @@ func runReplay(ctx context.Context, h *isledbdebug.Harness, b pipeline.Backend) 
 	const seedKeys = 20
 	v := verdict{
 		name:     "replay",
-		expected: "Tail replays existing keys on connect (observational only)",
+		expected: "ChangeReader reads historical feed from Oldest (observational only)",
 	}
 
-	fmt.Printf("\n--- replay (Tail with no new writes) [%s] ---\n", b)
-	fmt.Printf("what: write %d keys, flush, open Tail with no StartAfterKey, count events for %s\n",
-		seedKeys, replayWindow)
+	fmt.Printf("\n--- replay (ChangeReader from Oldest) [%s] ---\n", b)
+	fmt.Printf("what: write %d keys, flush, count change-feed entries\n",
+		seedKeys)
 
-	if err := h.WriteBatch(seedKeys, 1); err != nil {
+	if err := h.WriteBatch(ctx, seedKeys, 1); err != nil {
 		v.status = verdictFail
 		v.actual = "seed write failed: " + err.Error()
-		v.hint = "check tmp/cache/isledb-debug is writable, then re-run"
+		v.hint = "check data/cache/gedung-peristiwa is writable, then re-run"
 		return v
 	}
 	if err := h.Flush(ctx); err != nil {
@@ -248,13 +248,13 @@ func runReplay(ctx context.Context, h *isledbdebug.Harness, b pipeline.Backend) 
 	fmt.Printf("replay_events_in_%dms=%d\n", res.WindowMs, res.EventsInWindow)
 	if res.EventsInWindow > 0 {
 		v.status = verdictInfo
-		v.actual = fmt.Sprintf("%d historical keys replayed in %dms", res.EventsInWindow, res.WindowMs)
+		v.actual = fmt.Sprintf("%d historical changes in feed", res.EventsInWindow)
 		return v
 	}
 
 	v.status = verdictFail
 	v.actual = "no replay events (unexpected for seeded store)"
-	v.hint = "re-run with fresh prefix: --prefix-suffix debug-$(date +%s); if still zero, rm -rf tmp/cache/isledb-debug and retry"
+	v.hint = "re-run with fresh prefix: --prefix-suffix debug-$(date +%s); if still zero, rm -rf data/cache/gedung-peristiwa and retry"
 	return v
 }
 
@@ -320,7 +320,7 @@ func printFailureGuide(b pipeline.Backend, failed []verdict) {
 		} else {
 			fmt.Println("  → run: mise run dev:isledb-debug-compare")
 			fmt.Println("  memory PASS + " + string(b) + " FAIL → object-store visibility; keep poll+broadcast UI")
-			fmt.Println("  all backends FAIL incremental → IsleDB TailingReader or harness bug")
+			fmt.Println("  all backends FAIL incremental → IsleDB ChangeReader or harness bug")
 		}
 		if vis && inc {
 			fmt.Println("  both visibility and incremental failed → fix visibility first (flush/read path)")

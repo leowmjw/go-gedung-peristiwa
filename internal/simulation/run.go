@@ -26,7 +26,7 @@ func DefaultOptions(backend pipeline.Backend) Options {
 		Duration: 60 * time.Second,
 		Events:   1000,
 		Fast:     false,
-		CacheRoot: "tmp/cache",
+		CacheRoot: pipeline.DefaultCacheRoot,
 	}
 }
 
@@ -94,7 +94,7 @@ func Run(ctx context.Context, opts Options) Result {
 	}
 	defer p.Close(context.Background())
 
-	puts, err := p.WriteEmissions(emissions)
+	puts, err := p.WriteEmissions(ctx, emissions)
 	if err != nil {
 		res.FinishedAt = time.Now()
 		res.OK = false

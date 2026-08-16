@@ -17,7 +17,7 @@ func testFeeds() []gtfs.Feed {
 	}
 }
 
-func TestPipelineWriteScanTail(t *testing.T) {
+func TestPipelineWriteScanChangeFeed(t *testing.T) {
 	ctx := context.Background()
 	cfg := pipeline.StoreConfig{
 		Backend:   pipeline.BackendMemory,
@@ -39,11 +39,7 @@ func TestPipelineWriteScanTail(t *testing.T) {
 		{Agency: "mybas-ipoh", VehicleID: "b9", Lat: 4.6, Lng: 101.1, Timestamp: ts1},
 	}
 
-	tailCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	updates := p.TailUpdates(tailCtx)
-
-	puts, err := p.Write(positions)
+	puts, err := p.Write(ctx, positions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,18 +71,11 @@ func TestPipelineWriteScanTail(t *testing.T) {
 		t.Fatalf("stats vehicles=%d events=%d", count, events)
 	}
 
-	// Tail should eventually see writes after flush.
-	deadline := time.After(5 * time.Second)
-	var tailCount int
-	for tailCount < 1 {
-		select {
-		case _, ok := <-updates:
-			if !ok {
-				t.Fatal("tail channel closed early")
-			}
-			tailCount++
-		case <-deadline:
-			t.Fatal("timed out waiting for tail updates")
-		}
+	cat, err := p.CatalogForRegion(ctx, "national")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.Total < 2 {
+		t.Fatalf("expected change-feed history, total=%d", cat.Total)
 	}
 }

@@ -40,7 +40,7 @@ func TestPipelineUnknownAgency(t *testing.T) {
 	}
 	defer p.Close(ctx)
 
-	_, err = p.Write([]gtfs.VehiclePosition{{
+	_, err = p.Write(ctx, []gtfs.VehiclePosition{{
 		Agency: "unknown", VehicleID: "x", Lat: 3, Lng: 101, Timestamp: time.Now(),
 	}})
 	if err == nil {

@@ -19,7 +19,7 @@ func TestRecentIngestGroupedCap(t *testing.T) {
 
 	now := time.Now()
 	for i := range 12 {
-		_, err := p.Write([]gtfs.VehiclePosition{{
+		_, err := p.Write(ctx, []gtfs.VehiclePosition{{
 			Agency: "prasarana-rapid-bus-kl", VehicleID: "v" + string(rune('a'+i)),
 			Lat: 3.1, Lng: 101.6, Timestamp: now.Add(time.Duration(i) * time.Second),
 		}})
@@ -47,7 +47,7 @@ func TestRecentIngestKTMBNational(t *testing.T) {
 	}
 	defer p.Close(ctx)
 
-	_, err = p.Write([]gtfs.VehiclePosition{{
+	_, err = p.Write(ctx, []gtfs.VehiclePosition{{
 		Agency: "ktmb", VehicleID: "r1", Lat: 3.0, Lng: 101.0, Timestamp: time.Now(),
 	}})
 	if err != nil {
@@ -69,7 +69,7 @@ func TestRecentIngestForRegionFilter(t *testing.T) {
 	defer p.Close(ctx)
 
 	now := time.Now()
-	_, err = p.Write([]gtfs.VehiclePosition{
+	_, err = p.Write(ctx, []gtfs.VehiclePosition{
 		{Agency: "prasarana-rapid-bus-kl", VehicleID: "kl1", Lat: 3.1, Lng: 101.6, Timestamp: now},
 		{Agency: "mybas-johor", VehicleID: "j1", Lat: 1.5, Lng: 103.7, Timestamp: now},
 	})
@@ -96,7 +96,7 @@ func TestLatestPositionsForFilter(t *testing.T) {
 	defer p.Close(ctx)
 
 	now := time.Now()
-	_, err = p.Write([]gtfs.VehiclePosition{
+	_, err = p.Write(ctx, []gtfs.VehiclePosition{
 		{Agency: "prasarana-rapid-bus-kl", VehicleID: "a", Lat: 3.1, Lng: 101.6, Timestamp: now},
 		{Agency: "mybas-johor", VehicleID: "b", Lat: 1.5, Lng: 103.7, Timestamp: now},
 	})

@@ -71,7 +71,7 @@ func TestReplayPageJSONNotDoubleEscaped(t *testing.T) {
 }
 
 func lineContaining(body, needle string) string {
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		if strings.Contains(line, needle) {
 			return strings.TrimSpace(line)
 		}
@@ -116,7 +116,7 @@ func TestReplayStreamFrames(t *testing.T) {
 
 	ts1 := time.Unix(1700000000, 0).UTC()
 	ts2 := ts1.Add(time.Minute)
-	if _, err := p.Write([]gtfs.VehiclePosition{
+	if _, err := p.Write(ctx, []gtfs.VehiclePosition{
 		{Agency: "ktmb", VehicleID: "t1", Lat: 3.1, Lng: 101.6, Timestamp: ts1},
 	}); err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestReplayStreamFrames(t *testing.T) {
 	if err := p.FlushAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Write([]gtfs.VehiclePosition{
+	if _, err := p.Write(ctx, []gtfs.VehiclePosition{
 		{Agency: "ktmb", VehicleID: "t1", Lat: 3.2, Lng: 101.7, Timestamp: ts2},
 	}); err != nil {
 		t.Fatal(err)

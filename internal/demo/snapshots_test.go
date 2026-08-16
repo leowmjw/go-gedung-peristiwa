@@ -10,7 +10,7 @@ import (
 	"github.com/leow/go-gedung-peristiwa/internal/pipeline"
 )
 
-func TestListManifestSnapshotsAfterFlush(t *testing.T) {
+func TestCatalogAfterFlush(t *testing.T) {
 	ctx := context.Background()
 	cfg := pipeline.StoreConfig{
 		Backend:   pipeline.BackendMemory,
@@ -25,7 +25,7 @@ func TestListManifestSnapshotsAfterFlush(t *testing.T) {
 	defer p.Close(ctx)
 
 	ts := time.Unix(1700000000, 0).UTC()
-	if _, err := p.Write([]gtfs.VehiclePosition{
+	if _, err := p.Write(ctx, []gtfs.VehiclePosition{
 		{Agency: "ktmb", VehicleID: "t1", Lat: 3.1, Lng: 101.6, Timestamp: ts},
 	}); err != nil {
 		t.Fatal(err)
@@ -34,12 +34,12 @@ func TestListManifestSnapshotsAfterFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snaps, err := p.ListManifestSnapshots(ctx, "ktmb")
+	cat, err := p.CatalogForRegion(ctx, "national")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snaps) == 0 {
-		t.Fatal("expected at least one manifest snapshot after flush")
+	if cat.Total == 0 {
+		t.Fatal("expected change-feed history after flush")
 	}
 }
 
@@ -87,7 +87,7 @@ func TestCatalogForRegionSparse(t *testing.T) {
 	defer p.Close(ctx)
 
 	ts := time.Unix(1700000000, 0).UTC()
-	if _, err := p.Write([]gtfs.VehiclePosition{
+	if _, err := p.Write(ctx, []gtfs.VehiclePosition{
 		{Agency: "prasarana-rapid-bus-kl", VehicleID: "b1", Lat: 3.2, Lng: 101.7, Timestamp: ts},
 	}); err != nil {
 		t.Fatal(err)

@@ -41,7 +41,7 @@ func TestIncrementalMemory(t *testing.T) {
 	}
 	defer h.Close(ctx)
 
-	if err := h.WriteBatch(5, 1); err != nil {
+	if err := h.WriteBatch(ctx, 5, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Flush(ctx); err != nil {

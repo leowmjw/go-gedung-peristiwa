@@ -18,7 +18,7 @@ func TestPipelineFlushAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = p.Write([]gtfs.VehiclePosition{{
+	_, err = p.Write(ctx, []gtfs.VehiclePosition{{
 		Agency: "ktmb", VehicleID: "t2", Lat: 3.0, Lng: 101.0, Timestamp: time.Now(),
 	}})
 	if err != nil {

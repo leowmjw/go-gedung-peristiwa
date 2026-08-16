@@ -38,7 +38,7 @@ func TestSimulationMinIO(t *testing.T) {
 	}
 	defer p.Close(ctx)
 
-	if _, err := p.WriteEmissions(emissions); err != nil {
+	if _, err := p.WriteEmissions(ctx, emissions); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.FlushAll(ctx); err != nil {

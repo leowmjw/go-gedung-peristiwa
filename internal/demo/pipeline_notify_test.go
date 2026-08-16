@@ -58,7 +58,7 @@ func TestLatestPositions(t *testing.T) {
 	defer p.Close(ctx)
 
 	ts := time.Now()
-	_, err = p.Write([]gtfs.VehiclePosition{
+	_, err = p.Write(ctx, []gtfs.VehiclePosition{
 		{Agency: "ktmb", VehicleID: "t1", Lat: 3.1, Lng: 101.6, Timestamp: ts},
 	})
 	if err != nil {
