@@ -133,6 +133,20 @@ func (p *Poller) PollAll(ctx context.Context, feeds []Feed) []PollResult {
 	return results
 }
 
+// PollSequential polls feeds one at a time so a region batch does not stampede
+// the upstream GTFS API.
+func (p *Poller) PollSequential(ctx context.Context, feeds []Feed) []PollResult {
+	results := make([]PollResult, len(feeds))
+	for i, feed := range feeds {
+		if err := ctx.Err(); err != nil {
+			results[i] = PollResult{Feed: feed, Err: err}
+			continue
+		}
+		results[i] = p.pollFeed(ctx, feed)
+	}
+	return results
+}
+
 func parseFeedMessage(feed Feed, body []byte) ([]VehiclePosition, int, error) {
 	msg := &gtfsrt.FeedMessage{}
 	if err := proto.Unmarshal(body, msg); err != nil {

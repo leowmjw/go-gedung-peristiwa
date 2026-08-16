@@ -23,7 +23,7 @@ func main() {
 func run() int {
 	var (
 		addr         = flag.String("addr", envOr("DEMO_HTTP_ADDR", ":8081"), "HTTP listen address")
-		pollInterval = flag.Duration("poll-interval", 30*time.Second, "GTFS poll interval")
+		pollInterval = flag.Duration("poll-interval", demo.DefaultPollInterval, "fallback GTFS poll interval when no session has chosen one")
 		backend      = flag.String("backend", "minio", "storage backend: memory, minio")
 	)
 	flag.Parse()
@@ -60,7 +60,7 @@ func run() int {
 	poller := gtfs.DefaultPoller()
 
 	pollNow := make(chan string, 1)
-	go pollLoop(ctx, *pollInterval, poller, coordinator, pipe, pollNow)
+	go pollLoop(ctx, demo.PollTickInterval, poller, coordinator, pipe, pollNow)
 
 	srv := demoweb.NewServer(pipe, pipe, sessions, func(regionID string) {
 		select {
@@ -100,7 +100,7 @@ func pollLoop(ctx context.Context, interval time.Duration, poller *gtfs.Poller, 
 		agencyIDs := gtfs.AgencyIDs(feeds)
 		pipe.SetLastPolledAgencies(agencyIDs)
 
-		results := poller.PollAll(ctx, feeds)
+		results := poller.PollSequential(ctx, feeds)
 		var all []gtfs.VehiclePosition
 		for _, res := range results {
 			if res.Err != nil {
@@ -113,23 +113,29 @@ func pollLoop(ctx context.Context, interval time.Duration, poller *gtfs.Poller, 
 			all = append(all, res.Positions...)
 			slog.Info("feed polled", "agency", res.Feed.Agency, "vehicles", len(res.Positions))
 		}
-		if len(all) == 0 {
+		if ctx.Err() != nil {
 			return
 		}
-		puts, err := pipe.Write(all)
-		if err != nil {
-			slog.Error("write failed", "err", err)
-			return
-		}
-		if err := pipe.FlushAll(ctx); err != nil {
-			slog.Error("flush failed", "err", err)
-			return
+		if len(all) > 0 {
+			puts, err := pipe.Write(all)
+			if err != nil {
+				slog.Error("write failed", "err", err)
+				return
+			}
+			if err := pipe.FlushAll(ctx); err != nil {
+				slog.Error("flush failed", "err", err)
+				return
+			}
+			slog.Info("poll complete", "positions", puts, "regions", regionIDs)
+		} else {
+			slog.Warn("poll produced no positions, backing off", "regions", regionIDs)
 		}
 		now := time.Now()
 		pipe.SetLastPoll(now)
 		coordinator.MarkPolled(regionIDs, now)
-		pipe.NotifyPoll()
-		slog.Info("poll complete", "positions", puts, "regions", regionIDs)
+		if len(all) > 0 {
+			pipe.NotifyPoll()
+		}
 	}
 
 	scheduled := func() {

@@ -183,6 +183,30 @@ func TestIndexPage(t *testing.T) {
 	if !strings.Contains(body, "debug-ingest") {
 		t.Fatalf("missing debug toggle")
 	}
+	if !strings.Contains(body, `id="poll-interval"`) {
+		t.Fatal("missing poll interval control")
+	}
+	if !strings.Contains(body, `data-poll="10"`) || !strings.Contains(body, "seg-btn active") {
+		t.Fatal("missing default 10s poll selection")
+	}
+	if !strings.Contains(body, `data-poll="20"`) || !strings.Contains(body, `data-poll="30"`) {
+		t.Fatal("missing 20s/30s poll options")
+	}
+	if strings.Contains(body, `data-poll="5"`) {
+		t.Fatal("5s poll option should be removed")
+	}
+	if strings.Contains(body, `"\"klang-valley\""`) {
+		t.Fatal("mustJSON double-escaped activeRegion")
+	}
+	if !strings.Contains(body, `const activeRegion = "klang-valley";`) {
+		t.Fatal("activeRegion should be a JSON string, not a quoted-and-escaped string")
+	}
+	if !strings.Contains(body, `let pollSeconds = 10;`) {
+		t.Fatal("pollSeconds should be a JSON number")
+	}
+	if strings.Contains(body, `new Set("[`) {
+		t.Fatal("currentAgencies should be a JSON array, not a quoted string")
+	}
 }
 
 func TestVehicleStreamHeaders(t *testing.T) {
@@ -237,5 +261,122 @@ func TestGetRegions(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
+	}
+}
+
+func TestPollIntervalDefaultAndSet(t *testing.T) {
+	srv := newTestServer(&stubSource{})
+
+	recGet := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recGet, httptest.NewRequest(http.MethodGet, "/api/poll-interval", nil))
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("get status = %d body=%s", recGet.Code, recGet.Body.String())
+	}
+	cookie := sessionCookie(recGet)
+	var got map[string]any
+	if err := json.NewDecoder(recGet.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got["seconds"] != float64(10) {
+		t.Fatalf("default seconds = %v", got["seconds"])
+	}
+
+	body := bytes.NewBufferString(`{"seconds":20}`)
+	req := withSessionCookie(httptest.NewRequest(http.MethodPost, "/api/poll-interval", body), cookie)
+	recPost := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recPost, req)
+	if recPost.Code != http.StatusOK {
+		t.Fatalf("post status = %d body=%s", recPost.Code, recPost.Body.String())
+	}
+	var posted map[string]any
+	if err := json.NewDecoder(recPost.Body).Decode(&posted); err != nil {
+		t.Fatal(err)
+	}
+	if posted["seconds"] != float64(20) {
+		t.Fatalf("posted seconds = %v", posted["seconds"])
+	}
+
+	reqGet := withSessionCookie(httptest.NewRequest(http.MethodGet, "/api/region", nil), cookie)
+	recRegion := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recRegion, reqGet)
+	var regionResp map[string]any
+	if err := json.NewDecoder(recRegion.Body).Decode(&regionResp); err != nil {
+		t.Fatal(err)
+	}
+	if regionResp["pollSeconds"] != float64(20) {
+		t.Fatalf("region pollSeconds = %v", regionResp["pollSeconds"])
+	}
+}
+
+func TestPollIntervalRejectsInvalid(t *testing.T) {
+	srv := newTestServer(&stubSource{})
+	body := bytes.NewBufferString(`{"seconds":7}`)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/poll-interval", body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPollIntervalRejectsBadJSONAndMethod(t *testing.T) {
+	srv := newTestServer(&stubSource{})
+
+	recJSON := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recJSON, httptest.NewRequest(http.MethodPost, "/api/poll-interval", bytes.NewBufferString(`{`)))
+	if recJSON.Code != http.StatusBadRequest {
+		t.Fatalf("bad json status = %d", recJSON.Code)
+	}
+
+	recMethod := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recMethod, httptest.NewRequest(http.MethodPut, "/api/poll-interval", nil))
+	if recMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("method status = %d", recMethod.Code)
+	}
+}
+
+func TestPollIntervalIndependentSessions(t *testing.T) {
+	srv := newTestServer(&stubSource{})
+
+	recA := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recA, httptest.NewRequest(http.MethodGet, "/api/poll-interval", nil))
+	cookieA := sessionCookie(recA)
+
+	recB := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recB, httptest.NewRequest(http.MethodGet, "/api/poll-interval", nil))
+	cookieB := sessionCookie(recB)
+
+	body := bytes.NewBufferString(`{"seconds":30}`)
+	reqA := withSessionCookie(httptest.NewRequest(http.MethodPost, "/api/poll-interval", body), cookieA)
+	recPost := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recPost, reqA)
+	if recPost.Code != http.StatusOK {
+		t.Fatalf("post A status = %d", recPost.Code)
+	}
+
+	reqB := withSessionCookie(httptest.NewRequest(http.MethodGet, "/api/poll-interval", nil), cookieB)
+	recB2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recB2, reqB)
+	var respB map[string]any
+	if err := json.NewDecoder(recB2.Body).Decode(&respB); err != nil {
+		t.Fatal(err)
+	}
+	if respB["seconds"] != float64(10) {
+		t.Fatalf("browser B seconds = %v", respB["seconds"])
+	}
+}
+
+func TestPollIntervalTriggersRefresh(t *testing.T) {
+	var got string
+	srv := demoweb.NewServer(&stubSource{}, nil, demopkg.NewSessionStore(), func(regionID string) {
+		got = regionID
+	})
+	body := bytes.NewBufferString(`{"seconds":20}`)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/poll-interval", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got != "klang-valley" {
+		t.Fatalf("onRegionChange = %q", got)
 	}
 }

@@ -47,6 +47,7 @@ routing, testing/synctest
 - Tools available: ripgrep, fzf, air, goreleaser, watchexec
 - Use overmind to start MinIO + simulate (`mise run dev` — FinTech MVP UI + MinIO)
 - Use `mise run demo` for transit map (`Procfile.demo`, port `DEMO_HTTP_ADDR=:8081`)
+- Cloudflare Worker compiler: `mise run sites:compile` / `sites:test` — see **`internal/codexsites/AGENTS.md`** (Go demo vs D1+R2 deploy target; wrangler pin; internal Access)
 - IsleDB tail debugging: `mise run dev:isledb-debug` (see **IsleDB Learnings** below)
 
 ## Specification (MVP)

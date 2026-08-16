@@ -46,3 +46,17 @@ mise.local.toml
 # Ignore archivals
 ARCHIVE
 
+# Codex Sites generated wrapper and Node build artifacts
+node_modules/
+.next/
+.vinext/
+.wrangler/
+dist/
+outputs/
+work/
+
+# Ignore Codex
+.openai
+
+# Generated Cloudflare Worker / Codex Sites bundle
+codex-sites/

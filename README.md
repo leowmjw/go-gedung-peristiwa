@@ -85,6 +85,23 @@ mise run simulate-tigris
 
 Uses the same verification as MinIO (read-back, key order, compaction dedup).
 
+### 5. Codex Sites — Wrangler + D1 + R2
+
+The generated Codex Sites version replaces MinIO with Cloudflare R2 and uses D1 for the live projection and replay catalog. It fetches the current region's GTFS-Realtime feeds directly, writes each raw poll batch to R2, and renders the resulting vehicle positions in the browser. The live page polls automatically every 30 seconds; the button triggers an immediate refresh.
+
+```bash
+mise run sites:test       # compile, initialize local D1, and serve with Wrangler
+mise run sites:compile    # regenerate codex-sites/ only
+```
+
+The generated bundle is disposable and ignored by git. The rendered East Coast replay catalog below shows R2-backed snapshots after a live GTFS poll:
+
+![East Coast replay with R2 snapshots](docs/east-coast-r2-replay.jpg)
+
+The live Klang Valley view after GTFS ingestion:
+
+![Klang Valley live map](docs/klang-valley-live.jpg)
+
 ## All mise tasks
 
 | Task | Command | Description |
@@ -96,6 +113,8 @@ Uses the same verification as MinIO (read-back, key order, compaction dedup).
 | Simulate | `mise run simulate` | Simulation against MinIO only |
 | Tigris | `mise run simulate-tigris` | Simulation against Tigris |
 | MinIO setup | `mise run minio-setup` | Create bucket (MinIO must be running) |
+| Sites compile | `mise run sites:compile` | Generate the Codex Sites D1 + R2 bundle |
+| Sites test | `mise run sites:test` | Run the generated bundle locally with Wrangler |
 | Lint | `mise run lint` | `go vet ./...` |
 
 Makefile shortcuts: `make doctor`, `make test`, `make dev`, `make simulate`, `make simulate-tigris`.

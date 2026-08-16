@@ -1,6 +1,7 @@
 [tools]
 go = "1.26"
 air = "latest"
+wrangler = "4.118.0"
 
 [env]
 _.file = ".env"
@@ -198,3 +199,18 @@ echo "✅ Bucket '${MINIO_BUCKET}' is ready"
 [tasks.lint]
 description = "Run go vet"
 run = "go vet ./..."
+
+[tasks."sites:test"]
+description = "Compile and run the Codex Sites bundle locally with Wrangler"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+mise run sites:compile
+mise exec -- wrangler d1 execute gedung-peristiwa --local --file=codex-sites/schema.sql --persist-to codex-sites/.wrangler/state --config codex-sites/wrangler.jsonc --yes
+WRANGLER_LOG_PATH=codex-sites/.wrangler/wrangler.log mise exec -- wrangler dev --local --persist-to codex-sites/.wrangler/state --config codex-sites/wrangler.jsonc
+"""
+
+[tasks."sites:compile"]
+description = "Compile the current transit demo into the ignored Codex Sites D1 + R2 bundle"
+run = "go run ./cmd/codex-sites"
