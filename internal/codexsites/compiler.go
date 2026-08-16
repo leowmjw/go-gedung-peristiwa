@@ -59,17 +59,6 @@ func Generate(out string) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 	worker := strings.Replace(workerTS, "__REGIONS_JSON__", string(configJSON), 1)
-	// One R2 object is one replay frame. Snapshot catalog rows remain per
-	// agency for the existing UI, while replay reads each batch only once.
-	worker = strings.Replace(worker, "const regions=new Set<string>();", "const regionAgencies=new Map<string,Set<string>>();", 1)
-	worker = strings.Replace(worker, "regions.add(r.id);", "if(!regionAgencies.has(r.id))regionAgencies.set(r.id,new Set<string>());regionAgencies.get(r.id)!.add(v.agency);", 1)
-	worker = strings.Replace(worker, "for(const regionID of regions){for(const agency of agenciesFor(regionID))", "for(const [regionID,agencies] of regionAgencies){for(const agency of agencies)", 1)
-	worker = strings.Replace(worker, "SELECT id,r2_key,at_ms FROM snapshots", "SELECT DISTINCT r2_key,at_ms FROM snapshots", 1)
-	worker = strings.Replace(worker, "const {sid,regionID}=await session(request,env);if(path==='/api/regions')", "const {sid,regionID}=await session(request,env);if(path==='/api/poll'&&request.method==='POST')return withCookie(await pollGTFS(env,url.searchParams.get('region')||regionID),sid);if(path==='/api/regions')", 1)
-	worker = strings.Replace(worker, "if(path==='/api/vehicles')return withCookie(json(await latest(env,regionID)),sid);", "if(path==='/api/vehicles')return withCookie(json(await latest(env,regionID)),sid);if(path==='/api/status')return withCookie(json(await stats(env,regionID)),sid);", 1)
-	// D1 batches have a practical statement limit; keep large GTFS polls
-	// deployable without changing the ingestion payload shape.
-	worker = strings.Replace(worker, "if(statements.length)await env.DB.batch(statements);return json({accepted:positions.length,r2Key})", "for(let i=0;i<statements.length;i+=90)await env.DB.batch(statements.slice(i,i+90));return json({accepted:positions.length,r2Key})", 1)
 	files := map[string]string{
 		"public/index.html":  indexHTML,
 		"public/replay.html": replayHTML,
