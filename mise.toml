@@ -1,7 +1,8 @@
 [tools]
-go = "1.26"
+go = "latest"
 air = "latest"
-wrangler = "4.118.0"
+wrangler = "latest"
+"github:VictoriaMetrics/VictoriaTraces" = "latest"
 
 [env]
 _.file = ".env"

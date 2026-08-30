@@ -98,7 +98,7 @@ func (s *Server) handleReplayStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.replay.RunReplay(ctx, opts, func(positions []gtfs.VehiclePosition, prog demopkg.ReplayProgress) error {
-		if err := writeSSE(w, "vehicles", toViews(positions)); err != nil {
+		if err := writeSSE(w, "vehicles", replayViews(positions)); err != nil {
 			return err
 		}
 		return writeSSE(w, "progress", map[string]any{

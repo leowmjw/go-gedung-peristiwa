@@ -105,7 +105,6 @@ const indexHTML = `<!DOCTYPE html>
     setTimeout(() => map.invalidateSize(), 100);
 
     const markers = {};
-    const color = '#3498db';
     let currentAgencies = new Set({{mustJSON .ActiveRegion.Agencies}});
     let stream = null;
     let activeRegionId = activeRegion;
@@ -128,11 +127,15 @@ const indexHTML = `<!DOCTYPE html>
     window.updateVehicle = function(v, skipFilter) {
       const id = v.id;
       const latlng = [v.lat, v.lng];
+      const stale = v.stale;
+      const color = stale ? '#8b949e' : '#3498db';
       const popup = '<strong>' + v.agency + '</strong><br>Route: ' + (v.route || '—') +
-        '<br>Speed: ' + (v.speed ? v.speed.toFixed(1) : '0') + ' km/h';
+        '<br>Speed: ' + (v.speed ? v.speed.toFixed(1) : '0') + ' km/h' +
+        (stale ? '<br><em>Last seen &gt; 5 min ago</em>' : '');
       if (markers[id]) {
         markers[id].setLatLng(latlng);
         markers[id].setPopupContent(popup);
+        markers[id].setStyle({ color: color, fillColor: color });
       } else {
         markers[id] = L.circleMarker(latlng, {
           radius: 7, color: color, fillColor: color, fillOpacity: 0.9, weight: 2
@@ -152,7 +155,7 @@ const indexHTML = `<!DOCTYPE html>
       });
     };
 
-    function clearStaleMarkers(agencies) {
+    function clearMarkersOutsideAgencies(agencies) {
       Object.entries(markers).forEach(([id, m]) => {
         if (!agencies.has(m._agency)) {
           if (map.hasLayer(m)) map.removeLayer(m);
@@ -161,12 +164,26 @@ const indexHTML = `<!DOCTYPE html>
       });
     }
 
+    // dropMissing evicts markers the server no longer sends. The live snapshot
+    // omits vehicles past the visible window, so without this they would linger
+    // on the map forever at their last known position.
+    function dropMissing(seen) {
+      Object.keys(markers).forEach(id => {
+        if (!seen.has(id)) {
+          if (map.hasLayer(markers[id])) map.removeLayer(markers[id]);
+          delete markers[id];
+        }
+      });
+    }
+
     function applyVehiclesChunked(list) {
       const chunk = 40;
+      const seen = new Set(list.map(v => v.id));
       let i = 0;
       function step() {
         const slice = list.slice(i, i + chunk);
         if (slice.length === 0) {
+          dropMissing(seen);
           window.applyAgencyFilter();
           statusEl.textContent = 'Live — ' + list.length + ' vehicles';
           statusEl.className = 'status ok';
@@ -289,7 +306,7 @@ const indexHTML = `<!DOCTYPE html>
         setActiveRegionButton(region.id);
         updateTenantList(data.feeds || []);
         map.flyTo([region.center[0], region.center[1]], region.zoom, { duration: 1 });
-        clearStaleMarkers(currentAgencies);
+        clearMarkersOutsideAgencies(currentAgencies);
         connectStream();
       } catch (err) {
         statusEl.textContent = 'Region switch failed';

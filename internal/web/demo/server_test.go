@@ -24,10 +24,10 @@ type stubSource struct {
 	events    int64
 }
 
-func (s *stubSource) LatestPositionsFor(agencies map[string]struct{}) []gtfs.VehiclePosition {
+func (s *stubSource) LivePositionsFor(agencies map[string]struct{}, now time.Time) []gtfs.VehiclePosition {
 	var out []gtfs.VehiclePosition
 	for _, p := range s.positions {
-		if _, ok := agencies[p.Agency]; ok {
+		if _, ok := agencies[p.Agency]; ok && now.Sub(p.Timestamp) <= demopkg.LiveMapVisibleWindow {
 			out = append(out, p)
 		}
 	}
@@ -46,8 +46,8 @@ func (s *stubSource) SubscribePolls(ctx context.Context) <-chan struct{} {
 	return ch
 }
 
-func (s *stubSource) StatsFor(agencies map[string]struct{}) (int, time.Time, int64) {
-	return len(s.LatestPositionsFor(agencies)), s.lastPoll, s.events
+func (s *stubSource) StatsFor(agencies map[string]struct{}, now time.Time) (int, time.Time, int64) {
+	return len(s.LivePositionsFor(agencies, now)), s.lastPoll, s.events
 }
 
 func (s *stubSource) RecentIngestForRegion(regionID string) []demopkg.IngestRecord {
@@ -161,6 +161,43 @@ func TestGetVehicles(t *testing.T) {
 	}
 	if views[0]["agency"] != "prasarana-rapid-bus-kl" {
 		t.Fatalf("vehicle = %+v", views[0])
+	}
+}
+
+func TestGetVehiclesStaleFlag(t *testing.T) {
+	now := time.Now().UTC()
+	positions := []gtfs.VehiclePosition{
+		{Agency: "prasarana-rapid-bus-kl", VehicleID: "fresh", Lat: 3.2, Lng: 101.7, Timestamp: now.Add(-2 * time.Minute)},
+		{Agency: "prasarana-rapid-bus-kl", VehicleID: "stale", Lat: 3.2, Lng: 101.7, Timestamp: now.Add(-10 * time.Minute)},
+		{Agency: "prasarana-rapid-bus-kl", VehicleID: "ancient", Lat: 3.2, Lng: 101.7, Timestamp: now.Add(-45 * time.Minute)},
+	}
+	srv := newTestServer(&stubSource{positions: positions})
+	req := httptest.NewRequest(http.MethodGet, "/api/vehicles?region=klang-valley", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var views []map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&views); err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 2 {
+		t.Fatalf("expected 2 visible vehicles (fresh + stale), got %d", len(views))
+	}
+	byID := map[string]bool{}
+	for _, v := range views {
+		byID[v["id"].(string)] = v["stale"].(bool)
+	}
+	if stale, ok := byID["prasarana-rapid-bus-kl:fresh"]; !ok || stale {
+		t.Fatalf("fresh vehicle should be present and not stale: %+v", byID)
+	}
+	if stale, ok := byID["prasarana-rapid-bus-kl:stale"]; !ok || !stale {
+		t.Fatalf("stale vehicle should be present and marked stale: %+v", byID)
+	}
+	if _, ok := byID["prasarana-rapid-bus-kl:ancient"]; ok {
+		t.Fatal("ancient vehicle should be hidden from live map")
 	}
 }
 

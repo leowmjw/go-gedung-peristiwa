@@ -42,6 +42,7 @@ func TestGenerateCompilesCurrentTransitConfig(t *testing.T) {
 		"region_poll_state", "poll_seconds", "skipped:true", "knownRegion",
 		"poll interval must be 10, 20, or 30 seconds",
 		"pollFeedsSequential", "claimRegionPoll", "fetchFeed", "HTTP 429", "gtfsFeedsFor",
+		"FRESH_MS", "VISIBLE_MS", "timestamp_ms >= ?", "stale",
 	} {
 		if !strings.Contains(workerSrc, want) {
 			t.Errorf("worker.ts missing %q", want)
@@ -88,6 +89,14 @@ func TestGenerateCompilesCurrentTransitConfig(t *testing.T) {
 	}
 	if strings.Contains(appSrc, "setInterval(()=>{void pollGTFS()},30000)") {
 		t.Error("app.js still hardcodes a 30s poll; session interval 10/20/30s is required")
+	}
+	if !strings.Contains(appSrc, "v.stale") {
+		t.Error("app.js should gray out stale vehicles using v.stale")
+	}
+	// /api/vehicles omits vehicles past VISIBLE_MS, so markers missing from the
+	// payload must be removed or aged-out vehicles linger on the map.
+	if !strings.Contains(appSrc, "if(!seen.has(id)") {
+		t.Error("app.js must evict markers absent from the latest /api/vehicles payload")
 	}
 
 	index, err := os.ReadFile(filepath.Join(out, "public/index.html"))

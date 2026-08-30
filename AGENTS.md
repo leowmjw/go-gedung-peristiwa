@@ -101,9 +101,63 @@ routing, testing/synctest
 
 **Do not** attach live map SSE to per-mutation ChangeFeed fan-out (same UX problem as old TailingReader).
 
-**Live UI contract (keep):** `Write` → `FlushAll` → `NotifyPoll` → in-memory `LatestPositionsFor` → SSE. Replay is a separate ChangeFeed read path.
+**Live UI contract (keep):** `Write` → `FlushAll` → `NotifyPoll` → in-memory `LivePositionsFor` → SSE. Replay is a separate ChangeFeed read path.
 
 See **Future Ideas / Roadmap** below for remaining demo polish.
+
+## Live-map freshness (DONE — read this before touching the map)
+
+The in-memory projection accumulates **every vehicle ever seen** (hydration replays the
+whole change feed on startup). Rendering all of it made the live map lie: Penang showed
+**130** buses when the feed only reports ~16–20 at any instant. The fix is a **read-side**
+freshness filter — the write path still persists everything for replay/analytics.
+
+| Age since GTFS `timestamp` | Live map |
+|---|---|
+| ≤ 5 min (`LiveMapFreshWindow`) | normal blue marker |
+| 5–30 min | **gray** marker, `stale: true` in JSON |
+| > 30 min (`LiveMapVisibleWindow`) | **hidden** (still in IsleDB / D1) |
+
+**Go oracles:** `LiveMapFreshWindow` / `LiveMapVisibleWindow` + `LivePositionsFor` /
+`StatsFor(agencies, now)` in [`internal/demo/pipeline.go`](internal/demo/pipeline.go);
+`liveViews` / `replayViews` in [`internal/web/demo/server.go`](internal/web/demo/server.go).
+**Worker port:** `FRESH_MS` / `VISIBLE_MS` + `timestamp_ms >= ?` in `latest()` and `stats()`
+(`workerTS` in `internal/codexsites/templates.go`).
+
+**Rules:**
+- `LatestPositions` / `LatestPositionsFor` are **unfiltered** — analytics/debug only. Never
+  wire them back into the live map or the sidebar count.
+- Replay must **never** set `stale` (staleness is a live-map concept) — use `replayViews`.
+- The client **must evict markers missing from the latest payload** (`dropMissing` in
+  `render.go`, `if(!seen.has(id)` in the Worker `app.js`). Without it, vehicles that age past
+  30 min stay frozen on the map forever. Locked by `TestIndexHTMLEvictsMissingMarkers` and a
+  `compiler_test.go` grep.
+
+**Oracle tests:** `internal/demo/pipeline_fresh_test.go`,
+`TestGetVehiclesStaleFlag` / `TestLiveViewsMarksStale` / `TestReplayViewsNeverStale`.
+
+### Known gaps (next agent)
+
+1. **`vehicleSeen` is unbounded.** The freshness filter hides ancient vehicles but never
+   evicts them, so memory still grows with every unique vehicle id ever ingested — and
+   `hydrateFromChangeFeed` reloads the full history on every restart. Add pruning (ticker or
+   post-`Write`) for entries older than `LiveMapVisibleWindow`, and consider skipping
+   over-window entries during hydration. Same idea for the Worker: D1 `vehicle_positions`
+   grows forever; a periodic `DELETE WHERE timestamp_ms < ?` (or Cron Trigger) would bound it.
+2. **Staleness only re-evaluates on poll.** `pushSnapshot` stamps `now` per SSE push, and
+   pushes are driven by `NotifyPoll`, so a vehicle crossing the 5- or 30-min line can be up to
+   one poll interval (10–30 s) late to gray out / disappear. Acceptable today; if it ever
+   matters, send `lastSeen` and let the client recompute on a timer.
+3. **Popup text is imprecise.** Stale markers say “Last seen > 5 min ago” for anything in the
+   5–30 min band. The payload already carries the timestamp — render “12 min ago” instead.
+   Applies to both `render.go` and `templates.go` (`appJS`).
+4. **Worker `/api/status` `records` are unfiltered.** The debug overlay lists the last 10
+   `ingest_events` rows regardless of freshness. Fine for a debug tool; filter it if that list
+   is ever promoted into the main UI.
+5. **No composite index for the freshness scan.** `latest()` / `stats()` now filter
+   `agency IN (...) AND timestamp_ms >= ?` but `idx_positions_region_agency` does not cover
+   `timestamp_ms`. Row counts are tiny today; add
+   `(agency, timestamp_ms)` to `schema.sql` if the projection grows.
 
 ## Future Ideas / Roadmap
 
@@ -111,10 +165,13 @@ See **Future Ideas / Roadmap** below for remaining demo polish.
 - **Ingest everything we care about** into IsleDB/MinIO on every poll, even if the map
   does not display it yet — data is available for analytics, exports, and future views
   without re-fetching GTFS history.
-- **Live UI stays on the in-memory read model** (`LatestPositions`, updated in `Write`)
-  plus `NotifyPoll` batch SSE — not per-mutation ChangeFeed to each browser client.
+- **Live UI stays on the in-memory read model** (`vehicleSeen`, updated in `Write`, read via
+  `LivePositionsFor`) plus `NotifyPoll` batch SSE — not per-mutation ChangeFeed to each
+  browser client.
 - Rationale: tail replay + per-key fan-out is wrong for live SSE; write-through + projection
   is correct CQRS (see **IsleDB Learnings**).
+- The read model is **filtered by freshness** on the way out — see
+  **Live-map freshness** above. Persist everything; display only what is current.
 
 ### Live map — viewport & tenant filtering
 

@@ -53,6 +53,23 @@ Oracle tests: `internal/gtfs/poller_extra_test.go` — `TestPollSequentialDoesNo
 
 Oracle tests: `internal/demo/poll_test.go`.
 
+### Live-map freshness — MUST match
+
+| Invariant | Go oracle | Worker port |
+|---|---|---|
+| Fresh ≤ 5 min, visible ≤ 30 min | [`internal/demo/pipeline.go`](../demo/pipeline.go) `LiveMapFreshWindow`, `LiveMapVisibleWindow` | `FRESH_MS`, `VISIBLE_MS` |
+| Hide vehicles past the visible window | `LivePositionsFor` / `StatsFor(agencies, now)` | `timestamp_ms >= ?` in `latest()` **and** `stats()` |
+| Gray out 5–30 min vehicles | `liveViews` sets `Stale` | `stale:(now()-v.timestamp_ms)>FRESH_MS` |
+| Replay is never stale | `replayViews` (no `Stale`) | replay reads R2 batches directly, no `stale` field |
+| Client evicts markers missing from the payload | `dropMissing` in `internal/web/demo/render.go` | `if(!seen.has(id)` in `apply()` |
+
+Oracle tests: `internal/demo/pipeline_fresh_test.go`, `internal/web/demo/server_internal_test.go`
+(`TestLiveViewsMarksStale`, `TestReplayViewsNeverStale`, `TestIndexHTMLEvictsMissingMarkers`).
+
+Do **not** drop the marker-eviction step: the live payload omits aged-out vehicles, so without
+it they stay frozen on the map forever. Do **not** point the map at an unfiltered projection
+read (`LatestPositionsFor` in Go; `SELECT ... FROM vehicle_positions` with no cutoff in D1).
+
 ### Allowed divergences (do not “fix” back to Go)
 
 - Browser `POST /api/poll` per tab instead of server `PollTickInterval` ticker.
@@ -66,6 +83,8 @@ Oracle tests: `internal/demo/poll_test.go`.
 - `EventSource('/api/vehicles/stream')` in `app.js`
 - `/api/vehicles/stream` route in Worker (live SSE removed; replay SSE only)
 - Porting `PollAll` as the demo poller path
+- `latest()` / `stats()` without a `timestamp_ms` cutoff (stale vehicles would render as live)
+- An `apply()` that adds markers without removing ids absent from the payload
 
 ## Agent sync checklist
 
@@ -94,6 +113,10 @@ Run this when a Go demo feature lands or before deploying the Worker:
 - Default poll is **10s** (not 30). Options **10 / 20 / 30** only. Auto-poll must skip inside that window (`skipped: true`); `?force=1` bypasses with a 2s claim gap.
 - `regionByID` must not silently fall back for catalog/stream/poll query params.
 - Parallel `Promise.all` on region feeds caused 429s; demo uses `PollSequential`.
+- The projection accumulates every vehicle ever ingested, so an unfiltered `/api/vehicles`
+  overstates reality (Penang showed 130 buses for a ~16–20 vehicle feed). Filter on
+  `timestamp_ms` and evict missing markers client-side. `vehicle_positions` still grows
+  forever — bounding it with a scheduled `DELETE` is an open task (repo `AGENTS.md`).
 
 ## Cursor + Cloudflare (internal app)
 

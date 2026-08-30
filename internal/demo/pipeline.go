@@ -15,6 +15,15 @@ import (
 const flushInterval = 5 * time.Second
 const ingestCap = 10
 
+// Live-map freshness windows.
+const (
+	// LiveMapFreshWindow is the age below which a vehicle is drawn normally.
+	LiveMapFreshWindow = 5 * time.Minute
+	// LiveMapVisibleWindow is the maximum age a vehicle stays on the live map.
+	// Vehicles older than this are hidden (but kept in storage for replay).
+	LiveMapVisibleWindow = 30 * time.Minute
+)
+
 // IngestRecord is one position written to IsleDB (debug ring buffer).
 type IngestRecord struct {
 	Agency      string
@@ -137,7 +146,8 @@ func (p *Pipeline) Write(ctx context.Context, positions []gtfs.VehiclePosition) 
 	return puts, nil
 }
 
-// LatestPositions returns the in-memory latest position per vehicle.
+// LatestPositions returns the in-memory latest position per vehicle, with no
+// freshness filter. Analytics/debug only — use LivePositionsFor for the map.
 func (p *Pipeline) LatestPositions() []gtfs.VehiclePosition {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -258,7 +268,9 @@ func (p *Pipeline) RecentIngestForRegion(regionID string) []IngestRecord {
 	return out
 }
 
-// LatestPositionsFor returns latest positions filtered to the given agencies.
+// LatestPositionsFor returns latest positions filtered to the given agencies,
+// with no freshness filter. Analytics/debug only — the live map must use
+// LivePositionsFor so vehicles past LiveMapVisibleWindow are hidden.
 func (p *Pipeline) LatestPositionsFor(agencies map[string]struct{}) []gtfs.VehiclePosition {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -271,12 +283,33 @@ func (p *Pipeline) LatestPositionsFor(agencies map[string]struct{}) []gtfs.Vehic
 	return out
 }
 
-// StatsFor returns vehicle count for filtered agencies, last poll, and total events.
-func (p *Pipeline) StatsFor(agencies map[string]struct{}) (vehicleCount int, lastPoll time.Time, eventCount int64) {
+// LivePositionsFor returns positions visible on the live map for the given agencies.
+// Vehicles older than LiveMapVisibleWindow are excluded (they remain in storage for replay).
+func (p *Pipeline) LivePositionsFor(agencies map[string]struct{}, now time.Time) []gtfs.VehiclePosition {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]gtfs.VehiclePosition, 0)
+	for _, pos := range p.vehicleSeen {
+		if _, ok := agencies[pos.Agency]; !ok {
+			continue
+		}
+		if now.Sub(pos.Timestamp) <= LiveMapVisibleWindow {
+			out = append(out, pos)
+		}
+	}
+	return out
+}
+
+// StatsFor returns the currently visible vehicle count for filtered agencies,
+// plus the last poll time and total events written.
+func (p *Pipeline) StatsFor(agencies map[string]struct{}, now time.Time) (vehicleCount int, lastPoll time.Time, eventCount int64) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, pos := range p.vehicleSeen {
-		if _, ok := agencies[pos.Agency]; ok {
+		if _, ok := agencies[pos.Agency]; !ok {
+			continue
+		}
+		if now.Sub(pos.Timestamp) <= LiveMapVisibleWindow {
 			vehicleCount++
 		}
 	}

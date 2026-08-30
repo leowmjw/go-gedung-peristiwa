@@ -17,9 +17,9 @@ import (
 
 // PipelineSource is the pipeline API used by the demo server.
 type PipelineSource interface {
-	LatestPositionsFor(agencies map[string]struct{}) []gtfs.VehiclePosition
+	LivePositionsFor(agencies map[string]struct{}, now time.Time) []gtfs.VehiclePosition
 	SubscribePolls(ctx context.Context) <-chan struct{}
-	StatsFor(agencies map[string]struct{}) (vehicleCount int, lastPoll time.Time, eventCount int64)
+	StatsFor(agencies map[string]struct{}, now time.Time) (vehicleCount int, lastPoll time.Time, eventCount int64)
 	RecentIngestForRegion(regionID string) []demopkg.IngestRecord
 	LastPolledAgencies() []string
 }
@@ -211,7 +211,8 @@ func (s *Server) handleVehicles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, toViews(s.pipeline.LatestPositionsFor(agencies)))
+	now := time.Now().UTC()
+	writeJSON(w, liveViews(s.pipeline.LivePositionsFor(agencies, now), now))
 }
 
 func (s *Server) handleVehicleStream(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +229,8 @@ func (s *Server) handleVehicleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pushSnapshot := func() error {
-		views := toViews(s.pipeline.LatestPositionsFor(agencies))
+		now := time.Now().UTC()
+		views := liveViews(s.pipeline.LivePositionsFor(agencies, now), now)
 		if err := writeSSE(w, "vehicles", views); err != nil {
 			return err
 		}
@@ -281,6 +283,7 @@ type vehicleView struct {
 	Route   string  `json:"route"`
 	Speed   float64 `json:"speed"`
 	Bearing float64 `json:"bearing"`
+	Stale   bool    `json:"stale"`
 }
 
 type regionView struct {
@@ -333,7 +336,21 @@ func toView(pos gtfs.VehiclePosition) vehicleView {
 	}
 }
 
-func toViews(positions []gtfs.VehiclePosition) []vehicleView {
+// liveViews marks vehicles the agency has not refreshed within
+// LiveMapFreshWindow so the map can gray them out.
+func liveViews(positions []gtfs.VehiclePosition, now time.Time) []vehicleView {
+	out := make([]vehicleView, 0, len(positions))
+	for _, pos := range positions {
+		v := toView(pos)
+		v.Stale = now.Sub(pos.Timestamp) > demopkg.LiveMapFreshWindow
+		out = append(out, v)
+	}
+	return out
+}
+
+// replayViews renders historical frames. Staleness is a live-map concept, so
+// replayed positions are never marked stale.
+func replayViews(positions []gtfs.VehiclePosition) []vehicleView {
 	out := make([]vehicleView, 0, len(positions))
 	for _, pos := range positions {
 		out = append(out, toView(pos))
@@ -342,7 +359,7 @@ func toViews(positions []gtfs.VehiclePosition) []vehicleView {
 }
 
 func (s *Server) pushStats(w http.ResponseWriter, agencies map[string]struct{}, sid string) error {
-	count, lastPoll, events := s.pipeline.StatsFor(agencies)
+	count, lastPoll, events := s.pipeline.StatsFor(agencies, time.Now().UTC())
 	last := "—"
 	if !lastPoll.IsZero() {
 		last = lastPoll.Format("15:04:05")
