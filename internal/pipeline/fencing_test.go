@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ankur-anand/isledb"
 	"gocloud.dev/blob/memblob"
@@ -162,5 +163,110 @@ func TestRollingDeployFencing(t *testing.T) {
 		if found {
 			t.Fatalf("key %q from a fenced writer must not be visible", unwanted)
 		}
+	}
+}
+
+// TestFencedWriterNeverSelfRecovers covers the edge case a bad Kubernetes
+// rollout + rollback exposes: a "bad" new pod can open a Writer (fencing the
+// good old pod) before it fails its own health checks and gets aborted. With
+// maxUnavailable: 0, the old pod's ReplicaSet was never scaled down while the
+// new one was pending, so — confirmed via web search against Kubernetes'
+// documented rollback behavior and Argo Rollouts' abort behavior — a rollback
+// or abort just leaves that same old pod process running (or "reactivates"
+// its already-unscaled ReplicaSet); it does not restart it. That old pod's
+// writer is now permanently fenced with nothing left in the rollout to fix
+// it, and no new writer is opening because the bad ReplicaSet gets scaled to
+// zero.
+//
+// isledb has no answer to this by design: unlike a TTL leader lock (e.g.
+// "steal the lock if it hasn't been renewed in 10s"), a fenced *Writer* has
+// no expiry to wait out — `fenced` is a plain atomic.Bool in writer.go with
+// no timestamp field, so it can never flip back regardless of how much time
+// passes with no competing writer. This test proves that directly: it hammers
+// the fenced writer for a full second (an eternity next to any writer's
+// normal flush cadence) and every attempt fails identically throughout.
+// Recovery only ever comes from a *new* OpenWriter call — see
+// TestRollingDeployFencing for proof that a fresh writer always succeeds
+// immediately, no wait required.
+//
+// The operational conclusion (see AGENTS.md "Rolling deploys / fencing"):
+// since nothing in Kubernetes/Argo Rollouts' own rollback path will restart
+// this specific pod, our own liveness probe must fail on a writer stuck this
+// way so kubelet restarts the container and a fresh process reopens the
+// writer — that is the only recovery path, and it has to be triggered by us.
+func TestFencedWriterNeverSelfRecovers(t *testing.T) {
+	ctx := context.Background()
+	bkt := memblob.OpenBucket(nil)
+	defer bkt.Close()
+
+	opts := defaultDBOptions("shared-prefix")
+
+	db1, err := isledb.OpenBucket(ctx, bkt, "memory", opts)
+	if err != nil {
+		t.Fatalf("open db1: %v", err)
+	}
+	defer db1.Close()
+
+	writer1, err := db1.OpenWriter(ctx, isledb.DefaultWriterOptions())
+	if err != nil {
+		t.Fatalf("open writer1: %v", err)
+	}
+	if err := writer1.Put(ctx, []byte("before-fence"), []byte("v1")); err != nil {
+		t.Fatalf("put before fence: %v", err)
+	}
+	if err := writer1.Flush(ctx); err != nil {
+		t.Fatalf("flush before fence: %v", err)
+	}
+
+	// The bad rollout's pod: opens a writer (fencing writer1) and then, in
+	// this scenario, never becomes healthy and is eventually torn down —
+	// modeled here by simply never touching writer2/db2 again after this.
+	db2, err := isledb.OpenBucket(ctx, bkt, "memory", opts)
+	if err != nil {
+		t.Fatalf("open db2 (the bad rollout's pod): %v", err)
+	}
+	defer db2.Close()
+	if _, err := db2.OpenWriter(ctx, isledb.DefaultWriterOptions()); err != nil {
+		t.Fatalf("open writer2 (fences writer1): %v", err)
+	}
+
+	// The bad pod is gone (scaled to zero after abort/rollback) and nothing
+	// ever opens a fresh writer on its behalf. writer1's process is still
+	// alive — Kubernetes never restarted it — but every write it attempts
+	// must keep failing identically, with no self-healing over time.
+	deadline := time.Now().Add(time.Second)
+	attempts := 0
+	for time.Now().Before(deadline) {
+		attempts++
+		putErr := writer1.Put(ctx, []byte("stale"), []byte("must-not-appear"))
+		flushErr := writer1.Flush(ctx)
+		if putErr == nil && flushErr == nil {
+			t.Fatalf("attempt %d: writer1 unexpectedly recovered on its own "+
+				"(put=%v flush=%v) — isledb fencing must not self-expire", attempts, putErr, flushErr)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if attempts < 2 {
+		t.Fatalf("test didn't actually retry over time, got %d attempt(s)", attempts)
+	}
+	t.Logf("writer1 failed identically across %d attempts over 1s with no competing writer — "+
+		"confirms no TTL/lease-style self-recovery", attempts)
+
+	// The only real recovery path: a brand new OpenWriter call, exactly like
+	// a Kubernetes liveness-probe-triggered container restart would produce.
+	db3, err := isledb.OpenBucket(ctx, bkt, "memory", opts)
+	if err != nil {
+		t.Fatalf("open db3 (a restarted pod's fresh process): %v", err)
+	}
+	defer db3.Close()
+	writer3, err := db3.OpenWriter(ctx, isledb.DefaultWriterOptions())
+	if err != nil {
+		t.Fatalf("open writer3: %v", err)
+	}
+	if err := writer3.Put(ctx, []byte("recovered"), []byte("v3")); err != nil {
+		t.Fatalf("put on writer3: %v", err)
+	}
+	if err := writer3.Flush(ctx); err != nil {
+		t.Fatalf("flush on writer3: %v", err)
 	}
 }

@@ -296,6 +296,37 @@ This is single-writer-per-prefix semantics tolerating a brief overlap, not true 
 horizontal scaling — `replicas` should stay at 1 per prefix; readers (`OpenReaderDB`) scale
 independently and are unaffected by fencing.
 
+#### Edge case: a bad rollout that gets rolled back can strand the old pod fenced forever
+
+A "bad" new pod's process can call `OpenWriter` (fencing the old, good pod) during startup
+*before* it fails its own health checks — our `NewPipeline` opens the writer well before the HTTP
+server would ever answer a readiness probe. Confirmed by web search against Kubernetes' and Argo
+Rollouts' documented behavior: with `maxUnavailable: 0`, the old ReplicaSet is never scaled down
+while the new one is pending, so a rollback (`kubectl rollout undo`) or an aborted Argo Rollout
+just scales the *already-running* old ReplicaSet back to its existing count and scales the bad one
+to zero — it does not restart the surviving old pod's process. If that old pod's writer was
+already fenced by the bad pod before it got torn down, the old pod stays alive but permanently
+unable to write, and nothing in the rollback path ever fixes it.
+
+`isledb` has no TTL/lease-based recovery for this — verified in
+`internal/pipeline/fencing_test.go` (`TestFencedWriterNeverSelfRecovers`): a fenced `Writer`'s
+`fenced` field is a plain `atomic.Bool` with no timestamp, so hammering it with `Put`/`Flush` for a
+full second (with no competing writer ever appearing) fails identically on every attempt. This is
+not a shortcoming to route around — unlike a lease with a TTL (e.g. "break the lock if unrenewed
+for 10s"), which needs a wait period *and* clock-skew reasoning between owners, isledb's
+CAS-on-manifest-commit fencing recovers **instantly** the moment any process actually calls
+`OpenWriter` again (`TestRollingDeployFencing` proves this holds no matter how long a delay
+precedes that call) — there's no expiry to design or wait out. What's genuinely missing is
+something calling `OpenWriter` again at all.
+
+**Follow-up (not yet implemented):** since nothing in the Kubernetes/Argo rollback path restarts
+this specific pod, recovery has to come from our own liveness probe. There is no exported isledb
+signal for "my writer is fenced" (see above), so the probe can't check that specifically — but it
+can track "N consecutive `Write`/`FlushAll` failures from `pollLoop`, of any cause" and fail
+liveness past a threshold, so kubelet restarts the container. A fresh process reopens the writer
+and reclaims ownership immediately per `TestRollingDeployFencing`. `cmd/demo/main.go` doesn't do
+this yet — it only exposes an HTTP handler via `demoweb.NewServer`, no `/healthz`/liveness route.
+
 ### Why we abandoned TailingReader for live SSE (historical note)
 
 v0.4 `TailingReader.Tail` replayed all keys on connect and emitted per-key events (~164/poll), flooding EventSource. v0.5 ChangeFeed has the same fan-out risk if wired directly to live SSE. Batch projection remains correct CQRS.
