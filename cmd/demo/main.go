@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"log/slog"
@@ -25,9 +26,11 @@ func main() {
 
 func run() int {
 	var (
-		addr         = flag.String("addr", envOr("DEMO_HTTP_ADDR", ":8081"), "HTTP listen address")
-		pollInterval = flag.Duration("poll-interval", demo.DefaultPollInterval, "fallback GTFS poll interval when no session has chosen one")
-		backend      = flag.String("backend", "minio", "storage backend: memory, minio")
+		addr                 = flag.String("addr", envOr("DEMO_HTTP_ADDR", ":8081"), "HTTP listen address")
+		pollInterval         = flag.Duration("poll-interval", demo.DefaultPollInterval, "fallback GTFS poll interval when no session has chosen one")
+		backend              = flag.String("backend", "minio", "storage backend: memory, minio")
+		writeHealthThreshold = flag.Int("write-health-threshold", demo.DefaultWriteHealthThreshold,
+			"consecutive Write/FlushAll failures before /healthz reports unhealthy (0 uses the default)")
 	)
 	flag.Parse()
 
@@ -61,8 +64,14 @@ func run() int {
 	coordinator := demo.NewPollCoordinator(sessions, *pollInterval)
 	poller := gtfs.DefaultPoller()
 
+	// health tracks consecutive write failures so /healthz can fail liveness
+	// and let Kubernetes restart this container when the writer is stuck —
+	// see "Rolling deploys / fencing" in AGENTS.md for why isledb itself
+	// gives us no way to detect the specific cause (e.g. fencing).
+	health := demo.NewWriteHealth(*writeHealthThreshold)
+
 	pollNow := make(chan string, 1)
-	go pollLoop(ctx, cancel, demo.PollTickInterval, poller, coordinator, pipe, pollNow)
+	go pollLoop(ctx, cancel, demo.PollTickInterval, poller, coordinator, pipe, pollNow, health)
 
 	srv := demoweb.NewServer(pipe, pipe, sessions, func(regionID string) {
 		select {
@@ -70,9 +79,12 @@ func run() int {
 		default:
 		}
 	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", healthzHandler(health))
+	mux.Handle("/", srv.Handler())
 	httpSrv := &http.Server{
 		Addr:    *addr,
-		Handler: srv.Handler(),
+		Handler: mux,
 	}
 
 	go func() {
@@ -91,7 +103,7 @@ func run() int {
 	return 0
 }
 
-func pollLoop(ctx context.Context, stop context.CancelFunc, interval time.Duration, poller *gtfs.Poller, coordinator *demo.PollCoordinator, pipe *demo.Pipeline, pollNow <-chan string) {
+func pollLoop(ctx context.Context, stop context.CancelFunc, interval time.Duration, poller *gtfs.Poller, coordinator *demo.PollCoordinator, pipe *demo.Pipeline, pollNow <-chan string, health *demo.WriteHealth) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -147,6 +159,7 @@ func pollLoop(ctx context.Context, stop context.CancelFunc, interval time.Durati
 		if len(all) > 0 {
 			puts, err := pipe.Write(ctx, all)
 			if err != nil {
+				health.RecordFailure(err)
 				if stopIfWriterDead(err) {
 					return
 				}
@@ -154,12 +167,14 @@ func pollLoop(ctx context.Context, stop context.CancelFunc, interval time.Durati
 				return
 			}
 			if err := pipe.FlushAll(ctx); err != nil {
+				health.RecordFailure(err)
 				if stopIfWriterDead(err) {
 					return
 				}
 				slog.Error("flush failed", "err", err)
 				return
 			}
+			health.RecordSuccess()
 			slog.Info("poll complete", "positions", puts, "regions", regionIDs)
 		} else {
 			slog.Warn("poll produced no positions, backing off", "regions", regionIDs)
@@ -204,6 +219,32 @@ func pollLoop(ctx context.Context, stop context.CancelFunc, interval time.Durati
 		case <-ticker.C:
 			scheduled()
 		}
+	}
+}
+
+// healthzHandler is a Kubernetes liveness probe target. It reports 503 once
+// consecutive write failures reach health's threshold, so kubelet restarts
+// this container and a fresh process can reclaim a fenced writer — see
+// "Rolling deploys / fencing" in AGENTS.md and internal/demo/health.go.
+func healthzHandler(health *demo.WriteHealth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		failures, lastErr := health.Status()
+		status := "ok"
+		code := http.StatusOK
+		if !health.Healthy() {
+			status = "unhealthy"
+			code = http.StatusServiceUnavailable
+		}
+		body := map[string]any{
+			"status":               status,
+			"consecutive_failures": failures,
+		}
+		if lastErr != nil {
+			body["last_error"] = lastErr.Error()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(body)
 	}
 }
 

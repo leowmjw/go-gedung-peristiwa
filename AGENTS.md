@@ -319,13 +319,30 @@ CAS-on-manifest-commit fencing recovers **instantly** the moment any process act
 precedes that call) — there's no expiry to design or wait out. What's genuinely missing is
 something calling `OpenWriter` again at all.
 
-**Follow-up (not yet implemented):** since nothing in the Kubernetes/Argo rollback path restarts
-this specific pod, recovery has to come from our own liveness probe. There is no exported isledb
-signal for "my writer is fenced" (see above), so the probe can't check that specifically — but it
-can track "N consecutive `Write`/`FlushAll` failures from `pollLoop`, of any cause" and fail
-liveness past a threshold, so kubelet restarts the container. A fresh process reopens the writer
-and reclaims ownership immediately per `TestRollingDeployFencing`. `cmd/demo/main.go` doesn't do
-this yet — it only exposes an HTTP handler via `demoweb.NewServer`, no `/healthz`/liveness route.
+**Fix (implemented):** since nothing in the Kubernetes/Argo rollback path restarts this specific
+pod, recovery has to come from our own liveness probe. There is no exported isledb signal for "my
+writer is fenced" (see above), so the probe can't check that specifically — instead
+`internal/demo/health.go`'s `WriteHealth` tracks "N consecutive `Write`/`FlushAll` failures from
+`pollLoop`, of any cause" (`RecordSuccess`/`RecordFailure`, default threshold
+`DefaultWriteHealthThreshold = 3`, overridable via `cmd/demo/main.go`'s `-write-health-threshold`
+flag) and `GET /healthz` in `cmd/demo/main.go` (`healthzHandler`) reports `503` once that
+threshold is reached. Point a Kubernetes liveness probe at it; kubelet then restarts the
+container, and a fresh process reopens the writer and reclaims ownership immediately per
+`TestRollingDeployFencing` — no wait, no backoff needed on the recovery side. A single failed
+`Write`/`FlushAll` alone does not flip `/healthz` — only a *sustained* run does, so an ordinary
+transient MinIO/Tigris blip that self-resolves on the next poll never triggers a restart. Unit
+tests: `internal/demo/health_test.go`.
+
+Example Kubernetes wiring (not committed as a manifest in this repo):
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8081
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  failureThreshold: 1  # /healthz already debounces via -write-health-threshold; don't double it here
+```
 
 ### Why we abandoned TailingReader for live SSE (historical note)
 
