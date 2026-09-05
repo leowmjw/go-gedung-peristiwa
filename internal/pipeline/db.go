@@ -101,11 +101,14 @@ func OpenPrefixDB(ctx context.Context, cfg PrefixOpenConfig) (*PrefixDB, error) 
 	wOpts.Flush.Interval = cfg.FlushEvery
 	wOpts.OnFlushError = func(err error) {
 		// Terminal: a background flush failed once and the writer is now
-		// permanently unusable (ErrWriterFailed on every later call). The
-		// common cause here is fencing — a newer process opened a writer on
-		// this same prefix (rolling deploy overlap) — but any terminal cause
-		// lands here. Callers must stop writing; Close still runs every
-		// remaining shutdown step regardless of this error.
+		// permanently unusable (ErrWriterFailed on every later call). This is
+		// NOT how a rolling-deploy fencing overlap surfaces — isledb
+		// deliberately excludes fence errors from ErrWriterFailed, so a
+		// fenced writer keeps returning a plain, unwrapped error from every
+		// Put/Flush instead of ever reaching this callback (see
+		// fencing_test.go and "Rolling deploys / fencing" in AGENTS.md).
+		// Callers must stop writing; Close still runs every remaining
+		// shutdown step regardless of this error.
 		slog.Warn("isledb: writer failed, no longer accepting writes", "prefix", cfg.PrefixID, "error", err)
 	}
 	writer, err := db.OpenWriter(ctx, wOpts)

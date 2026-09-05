@@ -249,27 +249,48 @@ requests for older windows will silently come back empty once GC reclaims that h
 Writer and Maintenance ownership are fenced through the object store (isledb, not something we
 built): "different processes cannot safely act as the same owner at the same time." This is
 exactly the Kubernetes rolling-update case — `maxSurge: 1, maxUnavailable: 0` briefly runs the
-new pod's process (which opens its own `Writer`/`Maintenance` on the same prefix at startup)
-alongside the old pod still draining. The moment the new pod opens, the old pod's writer is
-fenced: its next `Put`/`Flush`/`Close` returns `isledb.ErrWriterFailed`, and its `Maintenance.Run`
-goroutine returns an error and stops. No corruption — this is isledb's designed-in safety net,
-not a failure mode to route around.
+new pod's process (which opens its own `Writer`/`Maintenance` on the same prefix at startup,
+independent of whether it has passed a readiness probe yet) alongside the old pod still draining.
+The moment the new pod opens, the old pod's writer is fenced. No corruption, ever — proven
+against the real dependency in `internal/pipeline/fencing_test.go` (`TestRollingDeployFencing`):
+whichever writer opens most recently becomes the sole owner immediately, with zero warm-up, and
+this holds no matter how long a wall-clock delay separates the fencing writer from the one before
+it (the test opens a *third* writer after an already-fenced second one to demonstrate this). So:
+if the new pod's rollout is delayed, the moment it (or a retry/replacement of it) finally does
+open a writer, it works correctly, exactly as if the delay hadn't happened — fencing is
+manifest-commit-generation-based, not a lease with a TTL that could get stuck or need to expire.
 
-What we do about it, all in `internal/pipeline/db.go` and `cmd/demo/main.go`:
-- `WriterOptions.OnFlushError` / `MaintenanceOptions.OnError` log fencing instead of the
-  previous silent `_ = maintenance.Run(runCtx)` swallow, so a rollout overlap is visible in logs
-  rather than indistinguishable from other terminal failures.
+**What is not true, and was wrong in an earlier version of this file and of
+`cmd/demo/main.go`:** application code cannot reliably detect "I was fenced" via any exported
+isledb error. `writer.go` deliberately excludes fence errors from ever becoming the exported
+`isledb.ErrWriterFailed` (`terminalOnError && !isFenceError(err)` before recording it), and the
+underlying `manifest.ErrFenced` sentinel lives in an unexported internal package. A fenced
+writer's `Put`/`Flush` just returns a plain wrapped error — `errors.Is(err, isledb.ErrWriterFailed)`
+and `errors.Is(err, isledb.ErrWriterClosed)` are both false for it. `fencing_test.go` asserts this
+directly and will fail loudly if a future isledb version changes it.
+
+Given that, `cmd/demo/main.go`'s `pollLoop` does **not** try to fast-exit specifically on
+fencing — there is no reliable signal to trigger on, and treating *every* write failure as "must
+be fenced, exit now" would kill the pod on an ordinary transient MinIO error too, which is worse
+than doing nothing. A fenced old pod instead keeps polling GTFS and logging `write failed`/
+`flush failed` every tick — noisy, but harmless — until Kubernetes' own SIGTERM (scaling down the
+old ReplicaSet) arrives; it keeps serving reads from its last-known `vehicleSeen` state the whole
+time, so there is no availability gap. `stopIfWriterDead` in `pollLoop` still checks
+`ErrWriterFailed`/`ErrWriterClosed` as a genuine fast-exit for a *different* class of failure —
+a writer that isledb has independently marked definitively terminal (e.g. a background flush that
+fails for a reason other than fencing) — just not this one.
+
+What we do fix, all in `internal/pipeline/db.go`:
+- `WriterOptions.OnFlushError` / `MaintenanceOptions.OnError` log terminal writer/maintenance
+  failures instead of the previous silent `_ = maintenance.Run(runCtx)` swallow — including
+  fencing, since `Maintenance.Run` does return (rather than loop forever) once its fence is lost,
+  even though we can't specifically label *why* it returned.
 - `PrefixDB.Close` used to `return` on the *first* failed step (commonly `Writer.Flush` once
   fenced), skipping `Maintenance.Close`/`Writer.Close`/`Reader.Close`/`closeBucket` entirely —
   leaking every handle after it on exactly the fenced-shutdown path this section is about. It
   now runs every step regardless and returns the first error, matching `Pipeline.Close`'s
-  already-correct per-agency loop.
-- `cmd/demo/main.go`'s `pollLoop` used to just log and retry forever on a write/flush error —
-  meaning a fenced old pod would keep polling all 15 GTFS feeds every tick for writes that can
-  never succeed again, until Kubernetes' `terminationGracePeriodSeconds` finally kills it. It now
-  detects `errors.Is(err, isledb.ErrWriterFailed)` / `ErrWriterClosed` and calls the root
-  `cancel()` immediately, which drives the existing SIGTERM shutdown path
-  (`httpSrv.Shutdown` → `pipe.Close`) right away instead of waiting out the grace period.
+  already-correct per-agency loop. This is what actually matters for a delayed/eventual rollout:
+  whenever SIGTERM does arrive (on time or late), shutdown still completes cleanly.
 
 This is single-writer-per-prefix semantics tolerating a brief overlap, not true multi-writer
 horizontal scaling — `replicas` should stay at 1 per prefix; readers (`OpenReaderDB`) scale

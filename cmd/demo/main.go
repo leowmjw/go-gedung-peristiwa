@@ -95,17 +95,28 @@ func pollLoop(ctx context.Context, stop context.CancelFunc, interval time.Durati
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// stopIfFenced handles a terminal writer/maintenance failure, the
-	// expected outcome when a newer process (e.g. the incoming pod in a
-	// Kubernetes rolling deploy) opens the same IsleDB prefix and fences this
-	// one out. Rather than keep polling GTFS every tick for writes that can
-	// never succeed again until this process exits, trigger shutdown now —
-	// see "Rolling deploys / fencing" in AGENTS.md.
-	stopIfFenced := func(err error) bool {
+	// stopIfWriterDead handles a writer failure that isledb has marked
+	// definitively terminal (ErrWriterFailed/ErrWriterClosed) — no retry can
+	// ever succeed again for this Writer, so keep polling GTFS and logging on
+	// every tick would just waste effort until this process is eventually
+	// killed. Trigger shutdown now instead.
+	//
+	// This does NOT cover the Kubernetes rolling-deploy fencing case (a newer
+	// pod's process opening the same IsleDB prefix): isledb deliberately
+	// excludes fence errors from ErrWriterFailed (writer.go:
+	// `terminalOnError && !isFenceError(err)`), and the underlying
+	// manifest.ErrFenced sentinel is unexported, so application code has no
+	// reliable way to detect "I was fenced" specifically — see
+	// internal/pipeline/fencing_test.go, which proves this against the real
+	// dependency, and "Rolling deploys / fencing" in AGENTS.md for why we
+	// don't try to fast-exit on that case (treating every write failure as
+	// "fenced, exit now" would kill the pod on an ordinary transient MinIO
+	// error too).
+	stopIfWriterDead := func(err error) bool {
 		if !errors.Is(err, isledb.ErrWriterFailed) && !errors.Is(err, isledb.ErrWriterClosed) {
 			return false
 		}
-		slog.Warn("writer no longer usable, stopping (likely superseded by a newer instance)", "err", err)
+		slog.Warn("writer permanently failed, stopping", "err", err)
 		stop()
 		return true
 	}
@@ -136,14 +147,14 @@ func pollLoop(ctx context.Context, stop context.CancelFunc, interval time.Durati
 		if len(all) > 0 {
 			puts, err := pipe.Write(ctx, all)
 			if err != nil {
-				if stopIfFenced(err) {
+				if stopIfWriterDead(err) {
 					return
 				}
 				slog.Error("write failed", "err", err)
 				return
 			}
 			if err := pipe.FlushAll(ctx); err != nil {
-				if stopIfFenced(err) {
+				if stopIfWriterDead(err) {
 					return
 				}
 				slog.Error("flush failed", "err", err)
