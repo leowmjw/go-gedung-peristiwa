@@ -70,7 +70,7 @@ func NewPipeline(ctx context.Context, cfg pipeline.StoreConfig, feeds []gtfs.Fee
 		}
 		p.agencies[feed.Agency] = aw
 	}
-	if err := p.hydrateFromChangeFeed(ctx); err != nil {
+	if err := p.hydrateFromSnapshot(ctx); err != nil {
 		p.Close(ctx)
 		return nil, err
 	}
@@ -92,29 +92,68 @@ func openAgency(ctx context.Context, cfg pipeline.StoreConfig, agencyID string) 
 	return &agencyWriter{PrefixDB: pdb}, nil
 }
 
-func (p *Pipeline) hydrateFromChangeFeed(ctx context.Context) error {
+// hydrateFromSnapshot seeds vehicleSeen from each agency's current KV state
+// via Reader.BootstrapView, rather than replaying the full change feed from
+// Oldest. BootstrapView binds the KV snapshot to the exact change-feed
+// boundary in one atomic call, which is the documented-safe way to do this
+// (calling Snapshot() and ChangeReader.Bounds() separately can race with a
+// concurrent writer and skip a committed change) — see IsleDB Learnings in
+// AGENTS.md. We don't currently resume the change feed from the returned
+// cursor: live updates flow through Write() in this same process, not a
+// replayed feed.
+func (p *Pipeline) hydrateFromSnapshot(ctx context.Context) error {
 	for agencyID, aw := range p.agencies {
-		_, err := pipeline.DrainChangeFeed(ctx, aw.DB, func(ch isledb.Change) error {
-			if ch.Operation != isledb.ChangePut {
-				return nil
-			}
-			pos, err := gtfs.ParseVehiclePosition(ch.Value)
-			if err != nil {
-				return nil
-			}
-			p.mu.Lock()
+		latest, err := aw.bootstrapLatest(ctx)
+		if err != nil {
+			return fmt.Errorf("hydrate %s: %w", agencyID, err)
+		}
+		p.mu.Lock()
+		for _, pos := range latest {
 			key := pos.Agency + ":" + pos.VehicleID
 			if prev, ok := p.vehicleSeen[key]; !ok || pos.Timestamp.After(prev.Timestamp) {
 				p.vehicleSeen[key] = pos
 			}
-			p.mu.Unlock()
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("hydrate %s: %w", agencyID, err)
 		}
+		p.mu.Unlock()
 	}
 	return nil
+}
+
+// bootstrapLatest returns the latest position per vehicle for this agency
+// from an atomic KV+change-feed-cursor snapshot.
+func (aw *agencyWriter) bootstrapLatest(ctx context.Context) (map[string]gtfs.VehiclePosition, error) {
+	view, err := aw.Reader.BootstrapView(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer view.Snapshot.Close()
+
+	minKey := gtfs.AgencyPrefix(aw.ID)
+	maxKey := gtfs.AgencyUpperBound(aw.ID)
+	iter, err := view.Snapshot.NewIterator(ctx, isledb.IteratorOptions{
+		MinKey: minKey,
+		MaxKey: maxKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	latest := make(map[string]gtfs.VehiclePosition)
+	for iter.Next() {
+		pos, err := gtfs.ParseVehiclePosition(iter.Value())
+		if err != nil {
+			continue
+		}
+		vid := gtfs.VehicleIDFromKey(string(iter.Key()))
+		if prev, ok := latest[vid]; !ok || pos.Timestamp.After(prev.Timestamp) {
+			latest[vid] = pos
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+	return latest, nil
 }
 
 // Write persists vehicle positions grouped by agency.

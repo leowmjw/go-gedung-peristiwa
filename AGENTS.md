@@ -139,11 +139,16 @@ freshness filter — the write path still persists everything for replay/analyti
 ### Known gaps (next agent)
 
 1. **`vehicleSeen` is unbounded.** The freshness filter hides ancient vehicles but never
-   evicts them, so memory still grows with every unique vehicle id ever ingested — and
-   `hydrateFromChangeFeed` reloads the full history on every restart. Add pruning (ticker or
-   post-`Write`) for entries older than `LiveMapVisibleWindow`, and consider skipping
-   over-window entries during hydration. Same idea for the Worker: D1 `vehicle_positions`
-   grows forever; a periodic `DELETE WHERE timestamp_ms < ?` (or Cron Trigger) would bound it.
+   evicts them, so memory still grows with every unique vehicle id ever ingested. Startup
+   hydration (`hydrateFromSnapshot` in `internal/demo/pipeline.go`) now reads a `Reader.BootstrapView`
+   KV snapshot per agency instead of replaying the full `ChangeReader` from `Oldest` — a direct
+   range scan rather than walking change-feed batches, and atomically bound to a resume cursor
+   per the v0.7.0 IsleDB docs. It does **not** fix the underlying growth: position keys embed
+   `timestamp_ns` (`gtfs.VehiclePosition.Key`), so every historical Put is still a distinct KV
+   entry the snapshot walks. Add pruning (ticker or post-`Write`) for entries older than
+   `LiveMapVisibleWindow`, and consider skipping over-window entries during hydration/scan.
+   Same idea for the Worker: D1 `vehicle_positions` grows forever; a periodic
+   `DELETE WHERE timestamp_ms < ?` (or Cron Trigger) would bound it.
 2. **Staleness only re-evaluates on poll.** `pushSnapshot` stamps `now` per SSE push, and
    pushes are driven by `NotifyPoll`, so a vehicle crossing the 5- or 30-min line can be up to
    one poll interval (10–30 s) late to gray out / disappear. Acceptable today; if it ever
@@ -191,16 +196,21 @@ freshness filter — the write path still persists everything for replay/analyti
 - Temporal workflows for long-running ingest / replay jobs
 - Tigris-specific APIs beyond S3
 
-## IsleDB Learnings (v0.5.0)
+## IsleDB Learnings (v0.7.0)
 
-Pinned `github.com/ankur-anand/isledb@v0.5.0`. v0.4 prefixes are incompatible; fresh data under `gedung-peristiwa` bucket, reader cache under `data/cache/gedung-peristiwa/`.
+Pinned `github.com/ankur-anand/isledb@v0.7.0`. v0.4 prefixes are incompatible; fresh data under `gedung-peristiwa` bucket, reader cache under `data/cache/gedung-peristiwa/`.
 
-### v0.5 API (what we use)
+v0.5.0 → v0.5.2 is additive only: adds `Reader.BootstrapView` (snapshot+cursor bound to the same manifest boundary, for materializing state and resuming the change feed from an exact point), `Reader.BloomCacheStats`, `ReaderOptions.BloomCacheSize`, and `ErrCommitIndeterminate`.
+
+v0.5.2 → v0.7.0 (adds `github.com/gofrs/flock` as a transitive dep) is also additive for the APIs we use: `Open`/`OpenBucket`, `DB.OpenWriter`/`OpenReader`/`OpenChangeReader`/`OpenMaintenance`, `DefaultWriterOptions`/`DefaultReaderOpenOptions`/`DefaultMaintenanceOptions`/`DefaultChangeFeedRetentionOptions`, and `ChangeFeedOptions{Payload: ChangeFeedFullValues}` are all unchanged. New surface includes change-feed GC (`change_feed_gc.go`, `ChangeFeedRetentionOptions`), a maintenance scheduler/fault-injection layer, and internal reader/compactor rewrites — none required code changes here. Verified by upgrading go.mod and running `go build ./...` + `go vet ./...` + `go test ./...`, all clean with zero source changes.
+
+### API (what we use)
 
 - `isledb.Open` / `OpenBucket` with `DBOptions{Prefix, ChangeFeed: {Payload: ChangeFeedFullValues}}`
 - One `Writer`, one long-lived `Reader`, one `Maintenance` per prefix (`OpenPrefixDB` in `internal/pipeline/db.go`)
 - `Writer.Put(ctx, …)` / `Flush(ctx)` — visibility boundary; `WriterOptions.Flush.Interval` for background flush
-- `OpenChangeReader` + `Read` until `CaughtUp()` — replay, verify, startup hydration
+- `OpenChangeReader` + `Read` until `CaughtUp()` — replay, verify
+- `Reader.BootstrapView(ctx)` — atomic KV `Snapshot` + resume `Cursor`, used for startup hydration
 - `Maintenance.Run` in-process for demo/simulate; `RunOnce` in tests/close
 - **Removed in v0.5:** `OpenDB`, `OpenCompactor`, `TailingReader`, public `manifest/` package
 
@@ -210,7 +220,14 @@ ChangeFeed writes ordered batches under `changes/`. We enable `ChangeFeedFullVal
 
 **Live map:** write-through IsleDB + in-memory `vehicleSeen` + `NotifyPoll` batch SSE (`event: vehicles`). Do **not** stream every `Change` to the browser.
 
-**Startup hydration:** `NewPipeline` drains each agency feed from `Bounds().Oldest` into `vehicleSeen`.
+**Startup hydration:** `NewPipeline` calls `Reader.BootstrapView` per agency and iterates the
+returned `Snapshot` (a direct KV range scan) into `vehicleSeen`, rather than replaying
+`ChangeReader` from `Bounds().Oldest`. `BootstrapView` binds the snapshot and resume cursor
+atomically in one call — do not reconstruct that boundary by calling `Snapshot()` and
+`ChangeReader.Bounds()` separately (a writer publishing between those two calls produces a
+cursor newer than the snapshot and silently skips a committed change). We don't currently
+resume the feed from the returned cursor; live updates come from `Write()` in-process, not a
+replayed feed.
 
 **Replay / verify:** walk `ChangeReader`; FinTech `Verify` counts feed changes ≥ unique keys.
 
