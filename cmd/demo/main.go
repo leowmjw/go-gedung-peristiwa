@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/ankur-anand/isledb"
 
 	"github.com/leow/go-gedung-peristiwa/internal/demo"
 	"github.com/leow/go-gedung-peristiwa/internal/gtfs"
@@ -59,7 +62,7 @@ func run() int {
 	poller := gtfs.DefaultPoller()
 
 	pollNow := make(chan string, 1)
-	go pollLoop(ctx, demo.PollTickInterval, poller, coordinator, pipe, pollNow)
+	go pollLoop(ctx, cancel, demo.PollTickInterval, poller, coordinator, pipe, pollNow)
 
 	srv := demoweb.NewServer(pipe, pipe, sessions, func(regionID string) {
 		select {
@@ -88,9 +91,24 @@ func run() int {
 	return 0
 }
 
-func pollLoop(ctx context.Context, interval time.Duration, poller *gtfs.Poller, coordinator *demo.PollCoordinator, pipe *demo.Pipeline, pollNow <-chan string) {
+func pollLoop(ctx context.Context, stop context.CancelFunc, interval time.Duration, poller *gtfs.Poller, coordinator *demo.PollCoordinator, pipe *demo.Pipeline, pollNow <-chan string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	// stopIfFenced handles a terminal writer/maintenance failure, the
+	// expected outcome when a newer process (e.g. the incoming pod in a
+	// Kubernetes rolling deploy) opens the same IsleDB prefix and fences this
+	// one out. Rather than keep polling GTFS every tick for writes that can
+	// never succeed again until this process exits, trigger shutdown now —
+	// see "Rolling deploys / fencing" in AGENTS.md.
+	stopIfFenced := func(err error) bool {
+		if !errors.Is(err, isledb.ErrWriterFailed) && !errors.Is(err, isledb.ErrWriterClosed) {
+			return false
+		}
+		slog.Warn("writer no longer usable, stopping (likely superseded by a newer instance)", "err", err)
+		stop()
+		return true
+	}
 
 	runPoll := func(feeds []gtfs.Feed, regionIDs []string) {
 		if len(feeds) == 0 {
@@ -118,10 +136,16 @@ func pollLoop(ctx context.Context, interval time.Duration, poller *gtfs.Poller, 
 		if len(all) > 0 {
 			puts, err := pipe.Write(ctx, all)
 			if err != nil {
+				if stopIfFenced(err) {
+					return
+				}
 				slog.Error("write failed", "err", err)
 				return
 			}
 			if err := pipe.FlushAll(ctx); err != nil {
+				if stopIfFenced(err) {
+					return
+				}
 				slog.Error("flush failed", "err", err)
 				return
 			}

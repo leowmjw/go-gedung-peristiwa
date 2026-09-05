@@ -202,7 +202,7 @@ Pinned `github.com/ankur-anand/isledb@v0.7.0`. v0.4 prefixes are incompatible; f
 
 v0.5.0 → v0.5.2 is additive only: adds `Reader.BootstrapView` (snapshot+cursor bound to the same manifest boundary, for materializing state and resuming the change feed from an exact point), `Reader.BloomCacheStats`, `ReaderOptions.BloomCacheSize`, and `ErrCommitIndeterminate`.
 
-v0.5.2 → v0.7.0 (adds `github.com/gofrs/flock` as a transitive dep) is also additive for the APIs we use: `Open`/`OpenBucket`, `DB.OpenWriter`/`OpenReader`/`OpenChangeReader`/`OpenMaintenance`, `DefaultWriterOptions`/`DefaultReaderOpenOptions`/`DefaultMaintenanceOptions`/`DefaultChangeFeedRetentionOptions`, and `ChangeFeedOptions{Payload: ChangeFeedFullValues}` are all unchanged. New surface includes change-feed GC (`change_feed_gc.go`, `ChangeFeedRetentionOptions`), a maintenance scheduler/fault-injection layer, and internal reader/compactor rewrites — none required code changes here. Verified by upgrading go.mod and running `go build ./...` + `go vet ./...` + `go test ./...`, all clean with zero source changes.
+v0.5.2 → v0.7.0 (adds `github.com/gofrs/flock` as a transitive dep) is also additive for the APIs we use: `Open`/`OpenBucket`, `DB.OpenWriter`/`OpenReader`/`OpenChangeReader`/`OpenMaintenance`, `DefaultWriterOptions`/`DefaultReaderOpenOptions`/`DefaultMaintenanceOptions`/`DefaultChangeFeedRetentionOptions`, and `ChangeFeedOptions{Payload: ChangeFeedFullValues}` are all unchanged. Change-feed GC (`change_feed_gc.go`, `ChangeFeedRetentionOptions`) already existed in v0.5.2 — we already used it; v0.7.0 hardens its deletion-plan writes (checksum-verified two-phase canonical/ready object paths) against concurrent-writer races. A maintenance scheduler/fault-injection layer and internal reader/compactor rewrites round out the diff — none required code changes. Verified by upgrading go.mod and running `go build ./...` + `go vet ./...` + `go test ./...`, all clean with zero source changes at the time of the bump.
 
 ### API (what we use)
 
@@ -230,6 +230,50 @@ resume the feed from the returned cursor; live updates come from `Write()` in-pr
 replayed feed.
 
 **Replay / verify:** walk `ChangeReader`; FinTech `Verify` counts feed changes ≥ unique keys.
+
+### Change-feed retention (GC)
+
+`MaintenanceOptions.ChangeFeedRetention` bounds how far back `ChangeReader`/`DrainChangeFeed`
+can replay — this is the historical-replay depth, **not** the KV data itself (position keys
+embed `timestamp_ns`, so KV state keeps every write regardless; see Known gaps below).
+`internal/pipeline/db.go` sets this whenever `PrefixOpenConfig.Retention` is true (every
+non-memory backend). `RetainFor` defaults to `StoreConfig.ChangeFeedRetainFor`, normalized by
+`pipeline.NormalizeChangeFeedRetainFor`: zero/unset → 30 days
+(`DefaultChangeFeedRetainFor`), clamped to a 1-year max (`MaxChangeFeedRetainFor`). Override via
+the `CHANGEFEED_RETAIN_FOR` env var (Go duration string, e.g. `720h`) — see `.env.example`.
+Pick this deliberately: it must be ≥ whatever range the `/replay` catalog advertises, or replay
+requests for older windows will silently come back empty once GC reclaims that history.
+
+### Rolling deploys / fencing
+
+Writer and Maintenance ownership are fenced through the object store (isledb, not something we
+built): "different processes cannot safely act as the same owner at the same time." This is
+exactly the Kubernetes rolling-update case — `maxSurge: 1, maxUnavailable: 0` briefly runs the
+new pod's process (which opens its own `Writer`/`Maintenance` on the same prefix at startup)
+alongside the old pod still draining. The moment the new pod opens, the old pod's writer is
+fenced: its next `Put`/`Flush`/`Close` returns `isledb.ErrWriterFailed`, and its `Maintenance.Run`
+goroutine returns an error and stops. No corruption — this is isledb's designed-in safety net,
+not a failure mode to route around.
+
+What we do about it, all in `internal/pipeline/db.go` and `cmd/demo/main.go`:
+- `WriterOptions.OnFlushError` / `MaintenanceOptions.OnError` log fencing instead of the
+  previous silent `_ = maintenance.Run(runCtx)` swallow, so a rollout overlap is visible in logs
+  rather than indistinguishable from other terminal failures.
+- `PrefixDB.Close` used to `return` on the *first* failed step (commonly `Writer.Flush` once
+  fenced), skipping `Maintenance.Close`/`Writer.Close`/`Reader.Close`/`closeBucket` entirely —
+  leaking every handle after it on exactly the fenced-shutdown path this section is about. It
+  now runs every step regardless and returns the first error, matching `Pipeline.Close`'s
+  already-correct per-agency loop.
+- `cmd/demo/main.go`'s `pollLoop` used to just log and retry forever on a write/flush error —
+  meaning a fenced old pod would keep polling all 15 GTFS feeds every tick for writes that can
+  never succeed again, until Kubernetes' `terminationGracePeriodSeconds` finally kills it. It now
+  detects `errors.Is(err, isledb.ErrWriterFailed)` / `ErrWriterClosed` and calls the root
+  `cancel()` immediately, which drives the existing SIGTERM shutdown path
+  (`httpSrv.Shutdown` → `pipe.Close`) right away instead of waiting out the grace period.
+
+This is single-writer-per-prefix semantics tolerating a brief overlap, not true multi-writer
+horizontal scaling — `replicas` should stay at 1 per prefix; readers (`OpenReaderDB`) scale
+independently and are unaffected by fencing.
 
 ### Why we abandoned TailingReader for live SSE (historical note)
 

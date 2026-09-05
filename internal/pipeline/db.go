@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -28,12 +30,12 @@ type PrefixDB struct {
 
 // PrefixOpenConfig controls opening a prefix database.
 type PrefixOpenConfig struct {
-	Store       StoreConfig
-	PrefixID    string
-	FlushEvery  time.Duration // zero disables timed background flush
-	Retention   bool          // enable default change-feed retention via maintenance
-	RunMaint    bool          // start Maintenance.Run in a background goroutine
-	MaintCtx    context.Context
+	Store      StoreConfig
+	PrefixID   string
+	FlushEvery time.Duration // zero disables timed background flush
+	Retention  bool          // enable change-feed retention via maintenance (Store.ChangeFeedRetainFor)
+	RunMaint   bool          // start Maintenance.Run in a background goroutine
+	MaintCtx   context.Context
 }
 
 func defaultDBOptions(prefix string) isledb.DBOptions {
@@ -97,6 +99,15 @@ func OpenPrefixDB(ctx context.Context, cfg PrefixOpenConfig) (*PrefixDB, error) 
 
 	wOpts := isledb.DefaultWriterOptions()
 	wOpts.Flush.Interval = cfg.FlushEvery
+	wOpts.OnFlushError = func(err error) {
+		// Terminal: a background flush failed once and the writer is now
+		// permanently unusable (ErrWriterFailed on every later call). The
+		// common cause here is fencing — a newer process opened a writer on
+		// this same prefix (rolling deploy overlap) — but any terminal cause
+		// lands here. Callers must stop writing; Close still runs every
+		// remaining shutdown step regardless of this error.
+		slog.Warn("isledb: writer failed, no longer accepting writes", "prefix", cfg.PrefixID, "error", err)
+	}
 	writer, err := db.OpenWriter(ctx, wOpts)
 	if err != nil {
 		_ = db.Close()
@@ -119,7 +130,11 @@ func OpenPrefixDB(ctx context.Context, cfg PrefixOpenConfig) (*PrefixDB, error) 
 	mOpts := isledb.DefaultMaintenanceOptions()
 	if cfg.Retention {
 		retention := isledb.DefaultChangeFeedRetentionOptions()
+		retention.RetainFor = NormalizeChangeFeedRetainFor(cfg.Store.ChangeFeedRetainFor)
 		mOpts.ChangeFeedRetention = &retention
+	}
+	mOpts.OnError = func(err error) {
+		slog.Warn("isledb: maintenance cycle failed", "prefix", cfg.PrefixID, "error", err)
 	}
 	maintenance, err := db.OpenMaintenance(ctx, mOpts)
 	if err != nil {
@@ -151,7 +166,15 @@ func OpenPrefixDB(ctx context.Context, cfg PrefixOpenConfig) (*PrefixDB, error) 
 		runCtx, cancel := context.WithCancel(maintCtx)
 		pdb.maintCancel = cancel
 		go func() {
-			_ = maintenance.Run(runCtx)
+			if err := maintenance.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+				// Maintenance ownership is fenced through the object store: if a
+				// newer process (e.g. the incoming pod in a rolling deploy) opens
+				// Maintenance on this same prefix, Run returns here instead of
+				// looping forever. That's expected during a rollout overlap, so
+				// we log and stop rather than treating it as fatal — see
+				// "Rolling deploys / fencing" in AGENTS.md.
+				slog.Warn("isledb: maintenance stopped", "prefix", cfg.PrefixID, "error", err)
+			}
 		}()
 	}
 
@@ -204,39 +227,43 @@ func (p *PrefixDB) RunMaintenanceOnce(ctx context.Context) error {
 	return err
 }
 
-// Close shuts down handles in the correct order.
+// Close shuts down handles in order, continuing through every step even if
+// an earlier one fails, and returns the first error seen. A failure here is
+// not just "external service down": Writer/Maintenance ownership is fenced
+// through the object store, so a newer process opening the same prefix (a
+// rolling Kubernetes deploy with the old pod still draining, for example)
+// makes the old writer/maintenance terminal — Flush and Maintenance.Run then
+// fail by design. Returning early on that first error used to skip closing
+// everything after it (leaking the reader, DB handle, and bucket on every
+// fenced shutdown); see AGENTS.md "Rolling deploys / fencing".
 func (p *PrefixDB) Close(ctx context.Context) error {
 	if p.maintCancel != nil {
 		p.maintCancel()
 	}
-	if p.Writer != nil {
-		if err := p.Writer.Flush(ctx); err != nil {
-			return err
+	var first error
+	keep := func(err error) {
+		if err != nil && first == nil {
+			first = err
 		}
+	}
+	if p.Writer != nil {
+		keep(p.Writer.Flush(ctx))
 	}
 	if p.Maintenance != nil {
 		_, _ = p.Maintenance.RunOnce(ctx)
-		if err := p.Maintenance.Close(ctx); err != nil {
-			return err
-		}
+		keep(p.Maintenance.Close(ctx))
 	}
 	if p.Writer != nil {
-		if err := p.Writer.Close(ctx); err != nil {
-			return err
-		}
+		keep(p.Writer.Close(ctx))
 	}
 	if p.Reader != nil {
-		if err := p.Reader.Close(); err != nil {
-			return err
-		}
+		keep(p.Reader.Close())
 	}
 	if p.DB != nil {
-		if err := p.DB.Close(); err != nil {
-			return err
-		}
+		keep(p.DB.Close())
 	}
 	if p.closeBucket != nil {
-		return p.closeBucket()
+		keep(p.closeBucket())
 	}
-	return nil
+	return first
 }
