@@ -89,6 +89,7 @@ const replayHTML = `<!DOCTYPE html>
 
     const markers = {};
     const groupColors = { ktmb: '#f85149', prasarana: '#58a6ff', mybas: '#3fb950' };
+    let selectedVehicleId = null;
 
     function agencyColor(agency) {
       if (agency === 'ktmb') return groupColors.ktmb;
@@ -96,11 +97,37 @@ const replayHTML = `<!DOCTYPE html>
       return groupColors.mybas;
     }
 
+    function markerStyle(agency, selected) {
+      return {
+        radius: selected ? 8 : 5,
+        color: selected ? '#f0f6fc' : agencyColor(agency),
+        weight: selected ? 3 : 1,
+        fillColor: agencyColor(agency),
+        fillOpacity: 0.85
+      };
+    }
+
+    // selectVehicle marks a vehicle as tracked: its marker is highlighted and
+    // the map follows it as new positions arrive. Selection survives
+    // pause/resume since it is independent of the replay stream itself.
+    function selectVehicle(id) {
+      if (selectedVehicleId === id) return;
+      const prev = selectedVehicleId;
+      selectedVehicleId = id;
+      if (prev && markers[prev]) markers[prev].setStyle(markerStyle(markers[prev]._agency, false));
+      if (markers[id]) {
+        markers[id].setStyle(markerStyle(markers[id]._agency, true));
+        map.panTo(markers[id].getLatLng(), { animate: true });
+        markers[id].openPopup();
+      }
+    }
+
     function clearMarkers() {
       for (const id of Object.keys(markers)) {
         map.removeLayer(markers[id]);
         delete markers[id];
       }
+      selectedVehicleId = null;
     }
 
     function applyVehicles(list) {
@@ -108,20 +135,31 @@ const replayHTML = `<!DOCTYPE html>
       for (const v of list) {
         seen.add(v.id);
         const latlng = [v.lat, v.lng];
+        const selected = v.id === selectedVehicleId;
+        const popup = '<strong>' + v.agency + '</strong><br>Route: ' + (v.route || '—') +
+          '<br>Speed: ' + (v.speed ? v.speed.toFixed(1) : '0') + ' km/h' +
+          (v.vehicle_id ? '<br>Vehicle: ' + v.vehicle_id : '');
         if (markers[v.id]) {
           markers[v.id].setLatLng(latlng);
+          markers[v.id].setPopupContent(popup);
+          markers[v.id].setStyle(markerStyle(v.agency, selected));
         } else {
-          markers[v.id] = L.circleMarker(latlng, {
-            radius: 5,
-            color: agencyColor(v.agency),
-            fillOpacity: 0.85
-          }).addTo(map).bindPopup(v.agency + ' — ' + (v.route || v.id));
+          markers[v.id] = L.circleMarker(latlng, markerStyle(v.agency, selected))
+            .addTo(map)
+            .bindPopup(popup)
+            .on('click', () => selectVehicle(v.id));
+        }
+        markers[v.id]._agency = v.agency;
+        if (selected) {
+          map.panTo(latlng, { animate: true });
+          if (!markers[v.id].isPopupOpen()) markers[v.id].openPopup();
         }
       }
       for (const id of Object.keys(markers)) {
         if (!seen.has(id)) {
           map.removeLayer(markers[id]);
           delete markers[id];
+          if (id === selectedVehicleId) selectedVehicleId = null;
         }
       }
     }
@@ -209,31 +247,61 @@ const replayHTML = `<!DOCTYPE html>
       document.getElementById('region-subtitle').textContent = r.label;
       map.flyTo([r.center[0], r.center[1]], r.zoom, { duration: 0.8 });
       clearMarkers();
-      stopReplay();
+      resetReplay();
       await loadCatalog(id);
     };
 
     let replaySource = null;
+    let lastFrameAt = null;
+    const btnPlay = document.getElementById('btn-play');
+    const btnStop = document.getElementById('btn-stop');
 
-    function stopReplay() {
+    // resetReplay drops any in-flight stream and forgets playback position,
+    // returning the controls to their pristine idle state.
+    function resetReplay() {
       if (replaySource) {
         replaySource.close();
         replaySource = null;
       }
-      document.getElementById('btn-play').disabled = false;
-      document.getElementById('btn-stop').disabled = true;
+      lastFrameAt = null;
+      btnPlay.disabled = false;
+      btnPlay.textContent = 'Play';
+      btnStop.disabled = true;
+      btnStop.textContent = 'Stop';
     }
 
-    function startReplay() {
-      stopReplay();
+    // pauseReplay closes the stream but keeps lastFrameAt so Resume can pick
+    // back up from the same point instead of restarting from frame 0.
+    function pauseReplay() {
+      if (replaySource) {
+        replaySource.close();
+        replaySource = null;
+      }
+      btnPlay.textContent = 'Reset';
+      btnStop.textContent = 'Resume';
+      document.getElementById('replay-status').textContent =
+        'Paused' + (lastFrameAt ? ' at ' + lastFrameAt : '') + '.';
+    }
+
+    // startReplay opens the SSE stream. Pass fromTime to resume from a prior
+    // position (or after a speed change mid-playback); omit it to start over.
+    function startReplay(fromTime) {
+      if (replaySource) {
+        replaySource.close();
+        replaySource = null;
+      }
+      if (!fromTime) selectedVehicleId = null;
       const speed = document.getElementById('speed').value;
       const status = document.getElementById('replay-status');
-      status.textContent = 'Connecting replay stream…';
-      const url = '/api/replay/stream?region=' + encodeURIComponent(currentRegion)
+      status.textContent = fromTime ? 'Resuming replay stream…' : 'Connecting replay stream…';
+      let url = '/api/replay/stream?region=' + encodeURIComponent(currentRegion)
         + '&speed=' + encodeURIComponent(speed);
+      if (fromTime) url += '&from=' + encodeURIComponent(fromTime);
       replaySource = new EventSource(url);
-      document.getElementById('btn-play').disabled = true;
-      document.getElementById('btn-stop').disabled = false;
+      btnPlay.textContent = 'Reset';
+      btnPlay.disabled = false;
+      btnStop.disabled = false;
+      btnStop.textContent = 'Stop';
 
       replaySource.addEventListener('vehicles', e => {
         applyVehicles(JSON.parse(e.data));
@@ -241,12 +309,13 @@ const replayHTML = `<!DOCTYPE html>
       replaySource.addEventListener('progress', e => {
         const p = JSON.parse(e.data);
         if (p.status === 'starting') return;
+        if (p.at) lastFrameAt = p.at;
         status.textContent = 'Frame ' + p.frame + ' / ' + p.total + (p.at ? ' · ' + p.at : '');
         status.className = 'status ok';
       });
       replaySource.addEventListener('done', () => {
         status.textContent = 'Replay complete.';
-        stopReplay();
+        resetReplay();
       });
       replaySource.addEventListener('error', e => {
         if (e.data) {
@@ -258,17 +327,29 @@ const replayHTML = `<!DOCTYPE html>
           }
         }
         status.className = 'status err';
-        stopReplay();
+        resetReplay();
       });
       replaySource.onerror = () => {
         if (replaySource && replaySource.readyState === EventSource.CLOSED) {
-          stopReplay();
+          resetReplay();
         }
       };
     }
 
-    document.getElementById('btn-play').addEventListener('click', startReplay);
-    document.getElementById('btn-stop').addEventListener('click', stopReplay);
+    btnPlay.addEventListener('click', () => {
+      // Play (idle) starts fresh; Reset (playing/paused) restarts from frame 0.
+      startReplay();
+    });
+    btnStop.addEventListener('click', () => {
+      if (replaySource) {
+        pauseReplay();
+      } else {
+        startReplay(lastFrameAt);
+      }
+    });
+    document.getElementById('speed').addEventListener('change', () => {
+      if (replaySource) startReplay(lastFrameAt);
+    });
 
     loadCatalog(activeRegion);
   </script>

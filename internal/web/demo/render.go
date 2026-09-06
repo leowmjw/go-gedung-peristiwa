@@ -131,6 +131,7 @@ const indexHTML = `<!DOCTYPE html>
       const color = stale ? '#8b949e' : '#3498db';
       const popup = '<strong>' + v.agency + '</strong><br>Route: ' + (v.route || '—') +
         '<br>Speed: ' + (v.speed ? v.speed.toFixed(1) : '0') + ' km/h' +
+        (v.vehicle_id ? '<br>Vehicle: ' + v.vehicle_id : '') +
         (stale ? '<br><em>Last seen &gt; 5 min ago</em>' : '');
       if (markers[id]) {
         markers[id].setLatLng(latlng);

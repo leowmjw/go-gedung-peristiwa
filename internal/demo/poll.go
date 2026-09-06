@@ -112,10 +112,17 @@ func regionPollPriority(regionID string) int {
 	}
 }
 
+// intervalLocked returns the actual upstream fetch interval for a region.
+// Sessions may ask for a faster local refresh (10s/20s), but data.gov.my only
+// republishes every gtfs.UpstreamRefreshInterval, so fetching faster than
+// that would just re-download identical data and waste the open API's quota.
 func (c *PollCoordinator) intervalLocked(regionID string) time.Duration {
 	interval := c.sessions.MinPollIntervalForRegion(regionID)
 	if interval <= 0 {
-		return c.interval
+		interval = c.interval
+	}
+	if interval < gtfs.UpstreamRefreshInterval {
+		return gtfs.UpstreamRefreshInterval
 	}
 	return interval
 }

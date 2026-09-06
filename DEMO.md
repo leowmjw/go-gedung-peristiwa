@@ -456,7 +456,7 @@ The map should show live vehicle markers updating every ~30 seconds, with the st
 ## Rate Limits & Fair Use
 
 The Malaysia Open API has rate limits (see [developer.data.gov.my](https://developer.data.gov.my)). The demo:
-- Polls each feed at most once per 30 seconds (matching their update frequency)
+- Polls each feed at most once per 30 seconds (matching their update frequency), even if a viewer picks a faster local refresh option (10s/20s only changes how often the browser is *shown* the latest cached data, not how often we hit data.gov.my)
 - Uses a single HTTP client with reasonable timeouts
 - Does not cache-bust or bypass any rate limiting
-- Respects `429` responses with exponential backoff
+- Respects `429` responses with exponential backoff up to a real 30s cap, honoring `Retry-After` when the server sends one

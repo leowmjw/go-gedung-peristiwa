@@ -275,15 +275,16 @@ func (s *Server) handleVehicleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 type vehicleView struct {
-	ID      string  `json:"id"`
-	Lat     float64 `json:"lat"`
-	Lng     float64 `json:"lng"`
-	Agency  string  `json:"agency"`
-	Group   string  `json:"group"`
-	Route   string  `json:"route"`
-	Speed   float64 `json:"speed"`
-	Bearing float64 `json:"bearing"`
-	Stale   bool    `json:"stale"`
+	ID        string  `json:"id"`
+	VehicleID string  `json:"vehicle_id"`
+	Lat       float64 `json:"lat"`
+	Lng       float64 `json:"lng"`
+	Agency    string  `json:"agency"`
+	Group     string  `json:"group"`
+	Route     string  `json:"route"`
+	Speed     float64 `json:"speed"`
+	Bearing   float64 `json:"bearing"`
+	Stale     bool    `json:"stale"`
 }
 
 type regionView struct {
@@ -325,14 +326,15 @@ func feedViews(feeds []gtfs.Feed) []feedView {
 
 func toView(pos gtfs.VehiclePosition) vehicleView {
 	return vehicleView{
-		ID:      pos.Agency + ":" + pos.VehicleID,
-		Lat:     pos.Lat,
-		Lng:     pos.Lng,
-		Agency:  pos.Agency,
-		Group:   agencyGroup(pos.Agency),
-		Route:   pos.Route,
-		Speed:   pos.Speed,
-		Bearing: pos.Bearing,
+		ID:        pos.Agency + ":" + pos.VehicleID,
+		VehicleID: pos.VehicleID,
+		Lat:       pos.Lat,
+		Lng:       pos.Lng,
+		Agency:    pos.Agency,
+		Group:     agencyGroup(pos.Agency),
+		Route:     pos.Route,
+		Speed:     pos.Speed,
+		Bearing:   pos.Bearing,
 	}
 }
 

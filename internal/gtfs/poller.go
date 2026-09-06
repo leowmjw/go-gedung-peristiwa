@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,6 +15,18 @@ import (
 )
 
 const defaultPollTimeout = 30 * time.Second
+
+// UpstreamRefreshInterval is how often data.gov.my actually republishes GTFS-R
+// vehicle positions. Fetching a feed faster than this only re-downloads
+// identical data, so callers should never schedule fetches below it — see
+// "Rate Limits & Fair Use" in DEMO.md.
+const UpstreamRefreshInterval = 30 * time.Second
+
+// maxPollAttempts bounds retries on a single feed. With the default backoff
+// (1s initial, doubling), attempt 5 is the first to actually hit the 30s cap
+// (1s, 2s, 4s, 8s, 16s, 30s) — fewer attempts would make the configured 30s
+// max unreachable.
+const maxPollAttempts = 6
 
 // Poller fetches and parses GTFS-R vehicle position feeds.
 type Poller struct {
@@ -73,7 +86,7 @@ func (p *Poller) pollFeed(ctx context.Context, feed Feed) PollResult {
 	}
 
 	var lastErr error
-	for attempt := range 4 {
+	for attempt := range maxPollAttempts {
 		if err := ctx.Err(); err != nil {
 			return PollResult{Feed: feed, Err: err}
 		}
@@ -97,7 +110,17 @@ func (p *Poller) pollFeed(ctx context.Context, feed Feed) PollResult {
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			lastErr = fmt.Errorf("rate limited (429)")
+			if attempt == maxPollAttempts-1 {
+				// Last attempt already used up; don't sleep just to give up.
+				break
+			}
 			wait := p.Backoff.duration(attempt)
+			if ra, ok := retryAfterDuration(resp.Header.Get("Retry-After")); ok {
+				wait = ra
+				if max := p.Backoff.Max; max > 0 && wait > max {
+					wait = max
+				}
+			}
 			slog.Warn("gtfs rate limited", "agency", feed.Agency, "retry_in", wait)
 			select {
 			case <-ctx.Done():
@@ -116,6 +139,20 @@ func (p *Poller) pollFeed(ctx context.Context, feed Feed) PollResult {
 	}
 
 	return PollResult{Feed: feed, Err: lastErr}
+}
+
+// retryAfterDuration parses a Retry-After header's delay-seconds form (the
+// only form rate-limit APIs realistically send here). Missing or malformed
+// values fall back to our own exponential backoff.
+func retryAfterDuration(header string) (time.Duration, bool) {
+	if header == "" {
+		return 0, false
+	}
+	seconds, err := strconv.Atoi(header)
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	return time.Duration(seconds) * time.Second, true
 }
 
 // PollAll polls all feeds concurrently and returns per-feed results.

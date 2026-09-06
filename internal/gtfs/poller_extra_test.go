@@ -75,6 +75,81 @@ func TestPollRateLimitRetry(t *testing.T) {
 	}
 }
 
+func TestPollRateLimitRetryAfterHeader(t *testing.T) {
+	feed := Feed{Agency: "ktmb"}
+	body := mustMarshalFeed(t, testFeedMessage([]*gtfsrt.FeedEntity{{
+		Id: new("e1"),
+		Vehicle: &gtfsrt.VehiclePosition{
+			Vehicle:  &gtfsrt.VehicleDescriptor{Id: new("bus-1")},
+			Position: &gtfsrt.Position{Latitude: proto.Float32(4.0), Longitude: proto.Float32(101.0)},
+		},
+	}}))
+
+	var calls int
+	var waited time.Duration
+	last := time.Now()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		now := time.Now()
+		waited = now.Sub(last)
+		last = now
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	feed.URL = srv.URL
+
+	p := &Poller{
+		Client:  srv.Client(),
+		Backoff: Backoff{Initial: time.Second, Max: 20 * time.Millisecond},
+	}
+	positions, err := p.Poll(context.Background(), feed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(positions) != 1 || calls != 2 {
+		t.Fatalf("positions=%d calls=%d", len(positions), calls)
+	}
+	if waited > 200*time.Millisecond {
+		t.Fatalf("Retry-After: 0 should not wait the exponential backoff (1s), waited %v", waited)
+	}
+}
+
+func TestPollRateLimitGivesUpWithoutFinalSleep(t *testing.T) {
+	feed := Feed{Agency: "ktmb"}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	feed.URL = srv.URL
+
+	p := &Poller{
+		Client:  srv.Client(),
+		Backoff: Backoff{Initial: time.Millisecond, Max: 4 * time.Millisecond},
+	}
+	start := time.Now()
+	_, err := p.Poll(context.Background(), feed)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if calls != maxPollAttempts {
+		t.Fatalf("calls = %d, want %d", calls, maxPollAttempts)
+	}
+	// Only maxPollAttempts-1 waits should occur; a wait after the last
+	// attempt would be wasted since no retry follows.
+	if elapsed > time.Duration(maxPollAttempts)*4*time.Millisecond {
+		t.Fatalf("took too long, elapsed=%v", elapsed)
+	}
+}
+
 func TestPollSequentialDoesNotOverlap(t *testing.T) {
 	body := mustMarshalFeed(t, testFeedMessage([]*gtfsrt.FeedEntity{{
 		Id: new("e1"),

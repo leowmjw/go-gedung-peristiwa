@@ -46,11 +46,11 @@ func (p *Pipeline) RunReplay(ctx context.Context, opts ReplayOptions, onFrame Re
 	if opts.Speed <= 0 {
 		opts.Speed = 1
 	}
-	frames, err := p.buildReplayFrames(ctx, opts)
+	allFrames, err := p.buildReplayFrames(ctx, opts)
 	if err != nil {
 		return err
 	}
-	if len(frames) == 0 {
+	if len(allFrames) == 0 {
 		return nil
 	}
 
@@ -64,6 +64,24 @@ func (p *Pipeline) RunReplay(ctx context.Context, opts ReplayOptions, onFrame Re
 	}
 
 	merged := make(map[string]gtfs.VehiclePosition)
+
+	// Resuming from opts.From should not forget vehicles whose last known
+	// position predates it: fold those earlier frames into merged silently
+	// so the first emitted frame still carries them, then only emit frames
+	// at or after the resume point.
+	split := 0
+	for split < len(allFrames) && !opts.From.IsZero() && allFrames[split].at.Before(opts.From) {
+		for _, mut := range allFrames[split].mutations {
+			key := mut.pos.Agency + ":" + mut.pos.VehicleID
+			merged[key] = mut.pos
+		}
+		split++
+	}
+	frames := allFrames[split:]
+	if len(frames) == 0 {
+		return nil
+	}
+
 	delay := replayFrameInterval / time.Duration(opts.Speed)
 
 	for i, frame := range frames {
@@ -123,9 +141,6 @@ func (p *Pipeline) buildReplayFrames(ctx context.Context, opts ReplayOptions) ([
 			}
 			pos, err := gtfs.ParseVehiclePosition(ch.Value)
 			if err != nil {
-				return nil
-			}
-			if !opts.From.IsZero() && pos.Timestamp.Before(opts.From) {
 				return nil
 			}
 			if !opts.To.IsZero() && pos.Timestamp.After(opts.To) {

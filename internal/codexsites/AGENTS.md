@@ -38,7 +38,7 @@ Re-read these Go symbols when syncing. If they changed, the Worker template may 
 | One region per poll | [`cmd/demo/main.go`](../cmd/demo/main.go) `pollLoop` → `FeedsForScheduledPoll` / `FeedsForRegionSwitch` | `POST /api/poll` for session region only |
 | Feeds inside region are **serial** (max 1 in-flight to data.gov.my) | [`internal/gtfs/poller.go`](../gtfs/poller.go) `PollSequential` (demo path). **Not** `PollAll`. | `pollFeedsSequential` + `fetchFeed`; never `Promise.all` over `feed.url` |
 | Feed order | [`internal/gtfs/feeds.go`](../gtfs/feeds.go) `AllFeeds()` filtered by region agencies | `gtfsFeedsFor` — same `FEEDS` array order |
-| HTTP 429 retry | `pollFeed`: 4 attempts, backoff initial 1s, max 30s | `fetchFeed` + `backoffMs` |
+| HTTP 429 retry | `pollFeed`: `maxPollAttempts` (6), backoff initial 1s doubling to a real 30s cap, honors `Retry-After` if sent | `fetchFeed` + `backoffMs`/`retryAfterMs`, `MAX_POLL_ATTEMPTS` (6) |
 | Claim before fetch | Go: `MarkPolled` after success (single-process ticker) | D1 `claimRegionPoll` **before** first GET (Worker substitute for mutex) |
 
 Oracle tests: `internal/gtfs/poller_extra_test.go` — `TestPollSequentialDoesNotOverlap`, `TestPollRateLimitRetry`.
@@ -49,7 +49,8 @@ Oracle tests: `internal/gtfs/poller_extra_test.go` — `TestPollSequentialDoesNo
 |---|---|---|
 | Default 10s, options 10/20/30 | [`internal/demo/poll.go`](../demo/poll.go) `DefaultPollSeconds`, `AllowedPollSeconds` | `DEFAULT_POLL`, `ALLOWED_POLL` in template |
 | Skip if region polled inside interval | `PollCoordinator.isStale` / `region_poll_state` | `claimRegionPoll` gap = `pollSeconds*1000`; `skipped: true` |
-| Force refresh | `?force=1` on Worker | `claimRegionPoll` gap = 2s when `force` |
+| Upstream fetch never faster than data.gov.my's refresh cadence, even if a session picked 10s/20s | `PollCoordinator.intervalLocked` floors on `gtfs.UpstreamRefreshInterval` (30s) | `claimRegionPoll` gap = `max(pollSeconds*1000, UPSTREAM_REFRESH_MS)` |
+| Force refresh | `?force=1` on Worker | `claimRegionPoll` gap = 2s when `force` (bypasses the 30s floor deliberately) |
 
 Oracle tests: `internal/demo/poll_test.go`.
 

@@ -112,8 +112,9 @@ func TestPollCoordinatorPriorityBeatsOlderOtherRegion(t *testing.T) {
 
 	coord := demo.NewPollCoordinator(sessions, time.Minute)
 	now := time.Now()
-	coord.MarkPolled([]string{"johor"}, now.Add(-15*time.Second))
-	coord.MarkPolled([]string{"klang-valley"}, now.Add(-11*time.Second))
+	// Both must have waited past the 30s upstream refresh floor to be "due".
+	coord.MarkPolled([]string{"johor"}, now.Add(-35*time.Second))
+	coord.MarkPolled([]string{"klang-valley"}, now.Add(-31*time.Second))
 
 	_, regions, err := coord.FeedsForScheduledPoll(now)
 	if err != nil {
@@ -170,8 +171,9 @@ func TestPollCoordinatorStarvedRegionJumpsQueue(t *testing.T) {
 
 	coord := demo.NewPollCoordinator(sessions, time.Minute)
 	now := time.Now()
-	coord.MarkPolled([]string{"johor"}, now.Add(-20*time.Second))
-	coord.MarkPolled([]string{"klang-valley"}, now.Add(-10*time.Second))
+	// Starvation kicks in at 2x the (floored) 30s interval, i.e. 60s.
+	coord.MarkPolled([]string{"johor"}, now.Add(-61*time.Second))
+	coord.MarkPolled([]string{"klang-valley"}, now.Add(-30*time.Second))
 
 	_, regions, err := coord.FeedsForScheduledPoll(now)
 	if err != nil {
@@ -210,12 +212,23 @@ func TestPollCoordinatorUsesMinSessionInterval(t *testing.T) {
 	now := time.Now()
 	coord.MarkPolled([]string{"klang-valley"}, now)
 
-	feeds, regions, err := coord.FeedsForScheduledPoll(now.Add(21 * time.Second))
+	// The fastest viewer asked for 20s, but the upstream GTFS refresh floor
+	// (30s) wins: data.gov.my doesn't publish any faster than that, so
+	// fetching sooner would just re-download identical data.
+	feeds, _, err := coord.FeedsForScheduledPoll(now.Add(29 * time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(feeds) != 0 {
+		t.Fatalf("expected still fresh at 29s (below the 30s upstream floor), feeds=%d", len(feeds))
+	}
+
+	feeds, regions, err := coord.FeedsForScheduledPoll(now.Add(30 * time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(regions) != 1 || len(feeds) == 0 {
-		t.Fatalf("expected due at 21s for 20s viewer, regions=%v feeds=%d", regions, len(feeds))
+		t.Fatalf("expected due at 30s, regions=%v feeds=%d", regions, len(feeds))
 	}
 }
 
@@ -253,20 +266,22 @@ func TestPollCoordinatorDefaultTenSeconds(t *testing.T) {
 	now := time.Now()
 	coord.MarkPolled([]string{"klang-valley"}, now)
 
-	feeds, _, err := coord.FeedsForScheduledPoll(now.Add(9 * time.Second))
+	// The session's default local interval is 10s, but the upstream GTFS
+	// refresh floor (30s) governs when we actually re-fetch.
+	feeds, _, err := coord.FeedsForScheduledPoll(now.Add(29 * time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(feeds) != 0 {
-		t.Fatal("expected still fresh at 9s with default 10s interval")
+		t.Fatal("expected still fresh at 29s (below the 30s upstream floor)")
 	}
 
-	_, regions, err := coord.FeedsForScheduledPoll(now.Add(10 * time.Second))
+	_, regions, err := coord.FeedsForScheduledPoll(now.Add(30 * time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(regions) != 1 {
-		t.Fatalf("expected due at 10s, regions=%v", regions)
+		t.Fatalf("expected due at 30s, regions=%v", regions)
 	}
 }
 
@@ -288,19 +303,19 @@ func TestNewPollCoordinatorZeroIntervalDefaults(t *testing.T) {
 	coord := demo.NewPollCoordinator(sessions, 0)
 	now := time.Now()
 	coord.MarkPolled([]string{"klang-valley"}, now)
-	feeds, _, err := coord.FeedsForScheduledPoll(now.Add(9 * time.Second))
+	feeds, _, err := coord.FeedsForScheduledPoll(now.Add(29 * time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(feeds) != 0 {
-		t.Fatal("expected still fresh at 9s with default 10s interval")
+		t.Fatal("expected still fresh at 29s (below the 30s upstream floor)")
 	}
-	_, regions, err := coord.FeedsForScheduledPoll(now.Add(10 * time.Second))
+	_, regions, err := coord.FeedsForScheduledPoll(now.Add(30 * time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(regions) != 1 {
-		t.Fatalf("expected due at 10s, regions=%v", regions)
+		t.Fatalf("expected due at 30s, regions=%v", regions)
 	}
 }
 
